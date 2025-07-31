@@ -1,6 +1,10 @@
 import logging
 
-logging.basicConfig(level=logging.DEBUG, format="%(asctime)s:%(levelname)s: %(message)s")
+logging.basicConfig(
+    level=logging.DEBUG, 
+    format="%(asctime)s:%(levelname)s:%(funcName)s: %(message)s",
+    datefmt="%H:%M:%S"
+)
 logging.getLogger('aiogram').setLevel(logging.CRITICAL)
 logging.getLogger('urllib3').setLevel(logging.CRITICAL)
 logger = logging.getLogger(__name__)
@@ -12,6 +16,7 @@ import cloudscraper
 from dotenv import load_dotenv; load_dotenv()
 
 TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN")
+queue = asyncio.Queue()
 
 slugs_data = {}
 
@@ -120,10 +125,28 @@ def filter_collections():
     logger.debug(f"Filtered collections: {len(filtered)}")
     return filtered
 
-async def get_all_collections() -> dict:
+async def wrapper_get_all_collections():
+    """Обертка для асинхронного вызова get_all_collections"""
+    loop = asyncio.get_event_loop()
+    while True:
+        temp_slugs_data = await asyncio.wait_for(
+            loop.run_in_executor(None, get_all_collections), 
+            timeout=60  # секунд
+        )
+        if not temp_slugs_data: continue
+        slugs_data.update(temp_slugs_data)
+
+        await queue.put(list(temp_slugs_data.keys()))
+        
+        for collection in temp_slugs_data.values():
+            asyncio.create_task(send_notifications(collection))
+        
+        await asyncio.sleep(60)
+        
+
+def get_all_collections() -> dict:
     """Собирает данные всех коллекций с OpenSea"""
-    global slugs_data
-    slugs_data = {}
+    temp_slugs_data = {}
     next_page = None
     variables = {
             "filter":{
@@ -137,9 +160,9 @@ async def get_all_collections() -> dict:
                 "direction":"DESC"
                 }
             }
+    # spended = time.time()
     with cloudscraper.create_scraper() as scraper:
         while True:
-            await asyncio.sleep(0.1)
             # Делаем запрос пока не дойдем до конца страниц
             if next_page: variables["cursor"] = next_page
 
@@ -147,14 +170,15 @@ async def get_all_collections() -> dict:
 
             # Формируем данные коллекций
             for item in response["data"]["topCollections"]["items"]:
-                slugs_data[item['slug']] = item
+                temp_slugs_data[item['slug']] = item
 
             next_page = response["data"]["topCollections"]["nextPageCursor"]
 
-            logger.debug(f"{next_page} {len(slugs_data)}")
-            if not next_page: break
-    for collection in slugs_data.values():
-        asyncio.create_task(send_notifications(collection))
+            # logger.debug(f"{next_page} {len(temp_slugs_data)} {(time.time() - spended)*1000:.2f} ms")
+            # spended = time.time()
+            if not next_page: return temp_slugs_data
+    
+        
 
 def get_usd_price(data, key):
     """Получает цену в USD проверяя на ошибки"""
@@ -170,34 +194,47 @@ def dict_update(d, u):
         else: d[k] = v
     return d
 
+async def manage_connections(ws: aiohttp.ClientWebSocketResponse):
+    # Подписываемся на все коллекции частями
+    try:
+        subs = set()
+        while not ws.closed:
+            
+            slugs = await queue.get()
+            if not slugs:
+                logger.warning("No slugs found.")
+                continue
+
+            to_sub = [slug for slug in slugs if slug not in subs]
+            
+            if not to_sub: logger.debug("No new slugs to subscribe."); continue
+            
+            subs.update(to_sub)
+            batch_size = 200
+            await asyncio.gather(*[ws.send_json({"id": str(uuid.uuid4()), "type": "subscribe", "payload": {"query": "subscription useCollectionStatsSubscription($slugs: [String!]!) {\n collectionsBySlugs(slugs: $slugs) {\n __typename\n ... on DelistedCollection {\n id\n __typename\n }\n ... on BlacklistedCollection {\n id\n __typename\n }\n ... on Collection {\n id\n slug\n ...CollectionStatsSubscription\n __typename\n }\n }\n}\nfragment CollectionStatsSubscription on Collection {\n id\n slug\n __typename\n floorPrice {\n pricePerItem {\n usd\n ...TokenPrice\n ...NativePrice\n __typename\n }\n __typename\n }\n topOffer {\n pricePerItem {\n usd\n ...TokenPrice\n ...NativePrice\n __typename\n }\n __typename\n }\n stats {\n ownerCount\n totalSupply\n uniqueItemCount\n listedItemCount\n volume {\n usd\n ...Volume\n __typename\n }\n sales\n oneMinute {\n floorPriceChange\n sales\n volume {\n usd\n ...Volume\n __typename\n }\n __typename\n }\n fiveMinute {\n floorPriceChange\n sales\n volume {\n usd\n ...Volume\n __typename\n }\n __typename\n }\n fifteenMinute {\n floorPriceChange\n sales\n volume {\n usd\n ...Volume\n __typename\n }\n __typename\n }\n oneHour {\n floorPriceChange\n sales\n volume {\n usd\n ...Volume\n __typename\n }\n __typename\n }\n oneDay {\n floorPriceChange\n sales\n volume {\n usd\n ...Volume\n __typename\n }\n __typename\n }\n sevenDays {\n floorPriceChange\n sales\n volume {\n usd\n ...Volume\n __typename\n }\n __typename\n }\n thirtyDays {\n floorPriceChange\n sales\n volume {\n usd\n ...Volume\n __typename\n }\n __typename\n }\n __typename\n }\n}\nfragment Volume on Volume {\n usd\n native {\n symbol\n unit\n __typename\n }\n __typename\n}\nfragment NativePrice on Price {\n ...UsdPrice\n token {\n unit\n contractAddress\n ...currencyIdentifier\n __typename\n }\n native {\n symbol\n unit\n contractAddress\n ...currencyIdentifier\n __typename\n }\n __typename\n}\nfragment UsdPrice on Price {\n usd\n token {\n contractAddress\n unit\n ...currencyIdentifier\n __typename\n }\n __typename\n}\nfragment currencyIdentifier on ContractIdentifier {\n contractAddress\n chain {\n identifier\n __typename\n }\n __typename\n}\nfragment TokenPrice on Price {\n usd\n token {\n unit\n symbol\n contractAddress\n chain {\n identifier\n __typename\n }\n __typename\n }\n __typename\n}","operationName": "useCollectionStatsSubscription", "variables": {"slugs": to_sub[i:i+batch_size]}}}) for i in range(0, len(to_sub), batch_size) if to_sub[i:i+batch_size]])
+            logger.info(f"Subscribed to {len(to_sub)} collections.")
+                # await asyncio.sleep(1)
+    except asyncio.CancelledError:
+        logger.info("Connection manager cancelled.")
+
 async def run_ws():
     """Подключается к WebSocket OpenSea и отслеживает изменения в коллекциях"""
     # Получаем данные всех коллекций # TODO: распараллелить
-    await get_all_collections()
+    asyncio.create_task(wrapper_get_all_collections())
     while True:
-        # Queqe get
-        slugs = list(slugs_data.keys())
-        if not slugs:
-            logger.warning("No slugs found.")
-            continue
-
+        
         async with aiohttp.ClientSession() as session:
             # try:
                 # Подключаемся к WebSocket
                 async with session.ws_connect(f"wss://os2-wss.prod.privatesea.io/subscriptions", heartbeat=29) as ws:
                     await ws.send_json({"type": "connection_init"})
-                    
-                    # Подписываемся на все коллекции частями
-                    batch_size = 200
-                    for i in range(0, len(slugs), batch_size):
 
-                        batch = slugs[i:i+batch_size]
-                        if not batch:
-                            continue
+                    # Подписываемся на коллекции
+                    collection_manager = asyncio.create_task(manage_connections(ws))
+                    while not queue._getters:
+                        await asyncio.sleep(0.1)
+                    await queue.put(list(slugs_data.keys()))
 
-                        await ws.send_json({"id": str(uuid.uuid4()), "type": "subscribe", "payload": {"query": "subscription useCollectionStatsSubscription($slugs: [String!]!) {\n collectionsBySlugs(slugs: $slugs) {\n __typename\n ... on DelistedCollection {\n id\n __typename\n }\n ... on BlacklistedCollection {\n id\n __typename\n }\n ... on Collection {\n id\n slug\n ...CollectionStatsSubscription\n __typename\n }\n }\n}\nfragment CollectionStatsSubscription on Collection {\n id\n slug\n __typename\n floorPrice {\n pricePerItem {\n usd\n ...TokenPrice\n ...NativePrice\n __typename\n }\n __typename\n }\n topOffer {\n pricePerItem {\n usd\n ...TokenPrice\n ...NativePrice\n __typename\n }\n __typename\n }\n stats {\n ownerCount\n totalSupply\n uniqueItemCount\n listedItemCount\n volume {\n usd\n ...Volume\n __typename\n }\n sales\n oneMinute {\n floorPriceChange\n sales\n volume {\n usd\n ...Volume\n __typename\n }\n __typename\n }\n fiveMinute {\n floorPriceChange\n sales\n volume {\n usd\n ...Volume\n __typename\n }\n __typename\n }\n fifteenMinute {\n floorPriceChange\n sales\n volume {\n usd\n ...Volume\n __typename\n }\n __typename\n }\n oneHour {\n floorPriceChange\n sales\n volume {\n usd\n ...Volume\n __typename\n }\n __typename\n }\n oneDay {\n floorPriceChange\n sales\n volume {\n usd\n ...Volume\n __typename\n }\n __typename\n }\n sevenDays {\n floorPriceChange\n sales\n volume {\n usd\n ...Volume\n __typename\n }\n __typename\n }\n thirtyDays {\n floorPriceChange\n sales\n volume {\n usd\n ...Volume\n __typename\n }\n __typename\n }\n __typename\n }\n}\nfragment Volume on Volume {\n usd\n native {\n symbol\n unit\n __typename\n }\n __typename\n}\nfragment NativePrice on Price {\n ...UsdPrice\n token {\n unit\n contractAddress\n ...currencyIdentifier\n __typename\n }\n native {\n symbol\n unit\n contractAddress\n ...currencyIdentifier\n __typename\n }\n __typename\n}\nfragment UsdPrice on Price {\n usd\n token {\n contractAddress\n unit\n ...currencyIdentifier\n __typename\n }\n __typename\n}\nfragment currencyIdentifier on ContractIdentifier {\n contractAddress\n chain {\n identifier\n __typename\n }\n __typename\n}\nfragment TokenPrice on Price {\n usd\n token {\n unit\n symbol\n contractAddress\n chain {\n identifier\n __typename\n }\n __typename\n }\n __typename\n}","operationName": "useCollectionStatsSubscription", "variables": {"slugs": batch}}})
-                        await asyncio.sleep(1)
-                    
                     # Слушаем сообщения
                     async for msg in ws:
                         msg_data = msg.json()
@@ -229,6 +266,8 @@ async def run_ws():
                         else:
                             logger.warning(f"Received unexpected message: {msg.data}")
                     else:
+                        collection_manager.cancel()
+                        await collection_manager
                         logger.info(f"WebSocket connection closed. {msg.type}")
 
             # except Exception as e:
@@ -247,7 +286,8 @@ async def main():
             asyncio.create_task(run_ws(i+batch_size, batch))
             await asyncio.sleep(3)
         """
-        await asyncio.gather(tg.start_bot(TG_BOT_TOKEN), run_ws())
+        asyncio.create_task(tg.start_bot())
+        await run_ws()
 
 try:
     asyncio.run(main())
