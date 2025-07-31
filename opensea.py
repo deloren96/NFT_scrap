@@ -1,114 +1,113 @@
 import logging
 
-logging.basicConfig(level=logging.WARNING, format="%(asctime)s:%(levelname)s: %(message)s")
+logging.basicConfig(level=logging.DEBUG, format="%(asctime)s:%(levelname)s: %(message)s")
 logging.getLogger('aiogram').setLevel(logging.CRITICAL)
 logging.getLogger('urllib3').setLevel(logging.CRITICAL)
 logger = logging.getLogger(__name__)
 
-import asyncio, aiohttp, os, json, uuid, heapq
+import asyncio, aiohttp, os, json, uuid, heapq, time
 import telegram_bot as tg
 import cloudscraper
 
-
-
 from dotenv import load_dotenv; load_dotenv()
 
-OPENSEA_API_KEY = os.getenv("OPENSEA_API_KEY")
-TG_BOT_TOKEN    = os.getenv("TG_BOT_TOKEN")
+TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN")
 
 slugs_data = {}
 
-async def get_all_collections_helix():
-    async with aiohttp.ClientSession() as session:
-        all_collections = []
-
-        url = "https://api.opensea.io/api/v2/collections?include_hidden=true&limit=100"
-        headers = {"X-API-KEY": OPENSEA_API_KEY, "accept": "application/json"}
-        
-        collections = await (await session.get(url, headers=headers)).json()
-        all_collections += [slug['collection'] for slug in collections.get("collections", [])]
-
-        logger.debug(f"{len(all_collections)} {collections.get('next')}")
-
-        while collections.get("next"):
-            collections = await (await session.get(f"{url}&next={collections.get('next')}", headers=headers)).json()
-            all_collections += [slug['collection'] for slug in collections.get("collections", [])]
-            
-            logger.debug(f"{len(all_collections)} {collections.get('next')}")
-
-        logger.info(f"Total collections: {len(all_collections)}")
-
-        with open("collections.json", "w") as f:
-            json.dump(all_collections, f, indent=2)
-
-async def get_collection_listings(slug):
-    async with aiohttp.ClientSession() as session:
-        all_offers = []
-        
-        url = f"https://api.opensea.io/api/v2/listings/collection/{slug}/all?limit=100"
-
-        offers = await (await session.get(url, headers={"X-API-KEY": OPENSEA_API_KEY, "accept": "application/json"})).json()
-        all_offers += offers.get("listings", [])
-        
-        if offers.get("next") and len(all_offers)>0: logger.debug(f"{len(all_offers)} {offers.get('next')}")
-        
-        while offers.get("next"):
-            offers = await (await session.get(f"{url}&next={offers.get('next')}", headers={"X-API-KEY": OPENSEA_API_KEY, "accept": "application/json"})).json()
-            all_offers += offers.get("listings", [])
-            
-            if offers.get("next") and len(all_offers)>0: logger.debug(f"{len(all_offers)} {offers.get('next')}")
-        
-        if len(all_offers)>0:
-            logger.info(f"Total offers for {slug}: {len(all_offers)}")
-            
-            # with open(f"offers_{slug}.json", "w") as f:
-            #     json.dump(offers, f, indent=2)
+last_notifications = {}
+last_diffs = {}
 
 def custom_condition(collection, user_id):
+    """Фильтрация коллекций по настройкам пользователей и проверка условий для отправки уведомлений"""
     # Условие
+    
     # Конфиги
-    config = tg.config.get(user_id, {})
-    filter_rules = config['filter_slugs_rules']
-    alert_rules = config['alert_rules']
-    if not config: return False
+    cfg = tg.configs[user_id]
+    if not cfg: return False
+
     ## Фильтры
+    
     # Черный список
-    if collection["slug"] in config.get("blacklist", []): return False
+    if collection["slug"] in cfg.blacklist: return False
     # Топ N по 1d объему
-    if filter_rules['top_N_by_1d_volume'] < float('inf'):
+    if cfg.top_N_by_1d_volume < float('inf'):
         colls = [coll for coll in slugs_data.values() if coll.get("stats") is not None]
         top_N_by_1d_volume = heapq.nlargest(
-            filter_rules['top_N_by_1d_volume'],
+            cfg.top_N_by_1d_volume,
             colls,
             key=lambda coll: coll["stats"]["volume"]["usd"]
         )
-        if filter_rules['top_N_by_1d_volume'] \
+        if cfg.top_N_by_1d_volume \
             and not any(d['name'] == collection['slug'] for d in top_N_by_1d_volume):
                 return False
     # Диапазон по 1d объему
-    if not (filter_rules['min_USD_1d_volume'] <= collection["stats"]["volume"]["usd"] <= filter_rules['max_USD_1d_volume']):
+    if not (cfg.min_USD_1d_volume <= collection["stats"]["volume"]["usd"] <= cfg.max_USD_1d_volume):
         return False
     # Диапазон по цене топ оффера
-    if not (filter_rules['min_USD_top_offer'] <= (get_usd_price(collection, "topOffer") or 0) <= filter_rules['max_USD_top_offer']):
+    if not (cfg.min_USD_top_offer <= (get_usd_price(collection, "topOffer") or 0) <= cfg.max_USD_top_offer):
         return False
     
     ## Alerts
+    
     topOffer = get_usd_price(collection, "topOffer")
     floorPrice = get_usd_price(collection, "floorPrice")
     if not (topOffer and floorPrice): return False
+    conditions = {}
     
-    if all([
-        # Разница между ценой топ оффера и ценой листинга
-        (floorPrice - topOffer) / floorPrice * 100 > alert_rules['diff_percent_offer_to_floor']
-        ]):
-        return True
+    # Разница между ценой топ оффера и ценой листинга
+    diff_percent_offer_to_floor = (floorPrice - topOffer) / floorPrice * 100
+    if diff_percent_offer_to_floor > cfg.diff_percent_offer_to_floor:
+        
+        conditions['diff_percent_offer_to_floor'] = diff_percent_offer_to_floor
+        
+    if any(conditions.values()): # all(required_conditions) or any(not_required_conditions)
+        return conditions
 
     return False
 
 async def send_notifications(collection):
-    for user_id in tg.config:
-        if custom_condition(collection, user_id):
-            try: await tg.bot.send_message(user_id, f"Notification")
+    """Проверка условий и отправка уведомлений"""
+    for user_id, cfg in tg.configs.items():
+        # Проверка кулдауна с последнего уведомления по notification_cooldown в config
+        if cfg.notification_cooldown:
+            now = int(time.time())
+            prev_notification = last_notifications.setdefault(collection['slug'], {}).setdefault(user_id, 0)
+            if now - prev_notification < cfg.notification_cooldown: continue
+
+        conditions = custom_condition(collection, user_id)
+        if conditions:
+            
+            # Проверка движения на шаг процентов с прошлого diff процента по percent_step в config
+            if cfg.percent_step:
+                diff_prev = last_diffs.setdefault(collection['slug'], {}).setdefault(user_id, 0.001)
+                step_size = diff_prev * (cfg.percent_step / 100)
+                if abs(conditions['diff_percent_offer_to_floor'] - diff_prev) <= step_size:
+                    continue
+            
+            # Получаем цены и создаем уведомление
+            usd_price = (get_usd_price(collection, 'topOffer') or get_usd_price(collection, 'floorPrice') or 0)
+            topOffer   = get_native_price(collection, "topOffer")
+            floorPrice = get_native_price(collection, "floorPrice")
+
+            try: 
+                await tg.bot.send_message(user_id, \
+                    
+                    f"Collection - {collection['slug']}\n"
+                    f"Price - {usd_price:.2f}$\n"
+                    f"List - {topOffer['price']} {topOffer['currency']}\n"
+                    f"Floor - {floorPrice['price']} {floorPrice['currency']}\n"
+                    f"Diff - <b>{conditions['diff_percent_offer_to_floor']:.2f}%</b>\n"
+                    f"opensea.io/collection/{collection['slug']}"
+
+                , parse_mode='HTML', disable_web_page_preview=True)
+                
+                if cfg.notification_cooldown: 
+                    last_notifications[collection['slug']][user_id] = now
+                
+                if cfg.percent_step: 
+                    last_diffs.setdefault(collection['slug'], {})[user_id] = conditions['diff_percent_offer_to_floor']
+            
             except Exception as e: logger.error(f"Error sending message to {user_id}: {e}")
 
 def filter_collections():
@@ -155,74 +154,40 @@ async def get_all_collections() -> dict:
             logger.debug(f"{next_page} {len(slugs_data)}")
             if not next_page: break
     for collection in slugs_data.values():
-        await send_notifications(collection)
-
-
-async def get_price(currency, session):
-    currencies = {"WETH": '2369',
-                  "ETH": '1027'}
-    return (await (await session.get(f"https://api.coinmarketcap.com/data-api/v3/cryptocurrency/detail/lite?id={currencies[currency]}")).json())["data"]["statistics"]["price"]
+        asyncio.create_task(send_notifications(collection))
 
 def get_usd_price(data, key):
-    value = data.get(key)
-    if value:
-        return value["pricePerItem"]["usd"]
-    return None
+    """Получает цену в USD проверяя на ошибки"""
+    return value["pricePerItem"]["usd"] if (value := data.get(key)) else None
+
+def get_native_price(data, key):
+    """Получает цену в нативной валюте проверяя на ошибки"""
+    return {'price': native['unit'], 'currency': native['symbol']} if (value := data.get(key)) and (native := value["pricePerItem"]["native"]) and native.get("unit") and native.get("symbol") else None
 
 def dict_update(d, u):
     for k, v in u.items():
-        if isinstance(v, dict) and isinstance(d.get(k), dict):
-            dict_update(d[k], v)
-        else:
-            d[k] = v
+        if isinstance(v, dict) and isinstance(d.get(k), dict): dict_update(d[k], v)
+        else: d[k] = v
     return d
 
-async def check_all_collection_stats(session, slugs=None):
-    if slugs is None:
-        slugs = filter_collections()
-
-    async def get_offers(slug):
-        res = {"errors": ["Rate limit exceeded"]}
-        delay = 0.1
-        while "errors" in res and res["errors"][0] == "Rate limit exceeded":
-            res = await(await session.get(f"https://api.opensea.io/api/v2/offers/collection/{slug}", headers={"X-API-KEY": OPENSEA_API_KEY, "accept": "application/json"})).json()
-            if "errors" in res: 
-                logger.debug(f"{slug} {res['errors']}") 
-                await asyncio.sleep(delay) 
-                delay *= 2
-
-        for offers in res.get("offers", []):
-            if isinstance(offers, dict) and offers:
-                topOffer = int(offers["price"]["value"]) / 1000000000000000000
-                logger.debug(f"Top offer: {topOffer} {offers['price']['currency']}")
-                return {"slug": slug, "topOffer": topOffer}
-        else:
-            logger.debug(f"No offers found for {slug}")
-    
-    offers = []
-    for slug in slugs:
-        res = await get_offers(slug)
-        if res:
-            offers.append(res)
-    logger.info(f"Total offers: {len(offers)}")
-
 async def run_ws():
-    id = 1 #int(id / 200)
+    """Подключается к WebSocket OpenSea и отслеживает изменения в коллекциях"""
+    # Получаем данные всех коллекций # TODO: распараллелить
+    await get_all_collections()
     while True:
-        # Получаем данные всех коллекций
-        await get_all_collections()
+        # Queqe get
+        slugs = list(slugs_data.keys())
+        if not slugs:
+            logger.warning("No slugs found.")
+            continue
+
         async with aiohttp.ClientSession() as session:
             # try:
-                # Подключаемся к WebSocket                
+                # Подключаемся к WebSocket
                 async with session.ws_connect(f"wss://os2-wss.prod.privatesea.io/subscriptions", heartbeat=29) as ws:
                     await ws.send_json({"type": "connection_init"})
                     
                     # Подписываемся на все коллекции частями
-                    slugs = [slug for slug in slugs_data.keys()]
-                    if not slugs:
-                        logger.warning("No slugs found.")
-                        continue
-
                     batch_size = 200
                     for i in range(0, len(slugs), batch_size):
 
@@ -235,11 +200,13 @@ async def run_ws():
                     
                     # Слушаем сообщения
                     async for msg in ws:
-                        data = msg.json()
-
-                        if data.get("payload"):
+                        msg_data = msg.json()
+                        
+                        if msg_data.get("type") == "connection_ack": logger.info("WebSocket connection established."); continue
+                        
+                        if msg_data.get("payload"):
                             
-                            collection = data["payload"]["data"]["collectionsBySlugs"]
+                            collection = msg_data["payload"]["data"]["collectionsBySlugs"]
                             if collection and (slug := collection.get("slug")):
 
                                 # Получаем цены
@@ -248,26 +215,28 @@ async def run_ws():
                                 old_floorPrice = get_usd_price(slugs_data[slug], "floorPrice")
                                 old_topOffer   = get_usd_price(slugs_data[slug], "topOffer")
                                 # Запись в кэш
-                                if slug in slugs_data:
-                                    if  old_floorPrice == floorPrice \
+                                if slug in slugs_data \
+                                    and old_floorPrice == floorPrice \
                                     and old_topOffer == topOffer:
                                         continue
                                 dict_update(slugs_data[slug], collection)
 
-                                logger.info(f"{id} \n\n Slug: {slug}\n Floor Price: {floorPrice} USD, Top Offer: {topOffer} USD\n{'-'*70}")
+                                # logger.debug(f"{id} \n\n Slug: {slug}\n Floor Price: {floorPrice} USD, Top Offer: {topOffer} USD\n{'-'*70}")
 
                                 # Проверка условий для уведомления
-                                await send_notifications(slugs_data[slug])
-                        else:
-                            logger.warning(f"{id} Received message: {msg.data}")
+                                asyncio.create_task(send_notifications(slugs_data[slug]))
                         
+                        else:
+                            logger.warning(f"Received unexpected message: {msg.data}")
+                    else:
+                        logger.info(f"WebSocket connection closed. {msg.type}")
+
             # except Exception as e:
             #     logger.error(f"Error in WebSocket connection: {e}")
             #     await asyncio.sleep(1)
 
 async def main():
-    try:
-        
+
         """
         slugs = ["3d-tiny-dinos-v2","abstractio","acclimatedmooncats","all-that-remains-4","alterego-k3p6r7q2","angels-r-shohei-ohtani-inception-base-black-45-leg","anticyclone-by-william-mapan","archetype-by-kjetil-golid","async-blueprints","avastar","axie-consumable-item","axie-land","axie-material","axie-ronin","azragames-thehopeful","azuki","azuki-mizuki-anime-shorts","azukielementals","bad-bunnz","bankr-club","based-egg","based-koalas-1","bastard-gan-punks-v2","beanzofficial","bearish-abstract","beeple-spring-collection","blhz-medel","bobocouncil","bored-ape-kennel-club","boredapeyachtclub","by-snowfro","cambriafounders","capsule-shop","chainfaces","chimpersnft","chonks","chromie-squiggle-by-snowfro","chronoforge","chronoforge-support-airships","chronoforge-totem-abstract","clonex","contortions-bytristan","cool-cats-nft","crafted-avatars","creatures","cryptid-art","cryptoadz-by-gremplin","cryptoarte","cryptodickbutts-s3","cryptoninjapartners-v2","cryptopunks","cryptoskulls","curiocardswrapper","damage-control-xcopy","dataland-biomelumina","deadfellaz","degods-eth","di-animals","doodles-official","dream-tickets-1","dreamiliomaker-abstract","dropzone-mcade","dungeonhero-1","dxterminal","ecumenopolis-by-joshua-bagley","edifice-by-ben-kovach","ens","fableborne-primordials-20","factura-by-mathias-isaksen","farworld-creatures","fauvtoshi","finalbosu","finiliar","fontana-by-harvey-rayner-patterndotco","freek-by-0xsh","friendship-bracelets-by-alexis-andre","fugzfamily","gamblerzgg","gemesis","genesis-by-claire-silver","genesis-creepz","genesishero-abstract","gigaverse-roms-abstract","glhfers","glitch-skulls-1","good-vibes-club","grifters-by-xcopy","grill-by-1-crush-264348104","grills-by-num1crush","gumbo-by-mathias-isaksen","habbo-avatars","hashmasks","hv-mtl","hypio","icxn-by-xcopy","infinex-patrons","io-imaginary-ones","jirasan","jrnyers","kaito-genesis","l3e7-guardians","l3e7-worlds","lamborghini-fast-forworld-revuelto","larvva-lads","lasercat-nft","layer3-cube-polygon","life-in-west-america-by-roope-rainisto","lilpudgys","max-pain-and-frens-by-xcopy","meebits","memelandcaptainz","memelandpotatoz","memories-of-qilin-by-emily-xie","merge-vv","meridian-by-matt-deslauriers","metawinners-1","mfers","mibera333","milady","mind-the-gap-by-mountvitruvius","mocaverse","moki-collection","monster-capsules","moonbirds","moonbirds-mythics","moonbirds-oddities","moriusa-stpr","murakami-flowers-2022-official","mutant-ape-yacht-club","mypethooligan","nakamigos","neotokyo-citizens","ninja-squad-official","och-gacha-weapon","och-genesis-ring","off-the-grid","official-gamegpt-nft","official-v1-punks","okcomputers","omnia-pets-genesis","on-chain-all-stars","on-chain-miniz","one-gravity-7","opepen-edition","osf-rld","otherdeed","otherdeed-expanded","otherside-koda","paladins-alpha","parallel-avatars","pebbles-by-zeblocks","pengztracted-abstract","piratenation","pixelmongen1","pnuks-1","primera-by-mitchell-and-yun","project-aeon","proscenium-by-remnynt","pudgypenguins","pudgyrods","qql-mint-pass","rare-pepe-curated","rektguy","remilio-babies","rolg-nft","sappy-seals","seven-gods","singularity-by-hideki-tsukamoto","space-doodles-official","sproto-gremlins","sugartown-cores","sugartown-oras","superrare","supremon","tcg-world-dragons","terraforms","thecatmoon","thecurrency","thememes6529","thesadtimesbirthcertificate","trademark-by-jack-butcher","trailheads","treehouse-squirrel-council","treeverse-plots","trichro-matic-by-mountvitruvius","trump-digital-trading-cards-america-first-edition","unioverse-game-content","unioverse-heroes-2","urban-punk-official","valhalla","veefriends","veefriends-series-2","vv-checks","vv-checks-originals","winds-of-yawanawa","wonky-stonks","world-of-women-nft","wrapped-cryptopunks","xcopy-editions","yumemono"]
 
@@ -279,8 +248,9 @@ async def main():
             await asyncio.sleep(3)
         """
         await asyncio.gather(tg.start_bot(TG_BOT_TOKEN), run_ws())
-    except KeyboardInterrupt:
-        logger.warning("Stopped.")
 
-asyncio.run(main())
+try:
+    asyncio.run(main())
+except KeyboardInterrupt:
+        logger.warning("Stopped.")
 # asyncio.run(check_all_collection_stats())
