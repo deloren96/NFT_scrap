@@ -9,8 +9,8 @@ logging.getLogger('aiogram').setLevel(logging.CRITICAL)
 logging.getLogger('urllib3').setLevel(logging.CRITICAL)
 logger = logging.getLogger(__name__)
 
-import asyncio, aiohttp, os, json, uuid, heapq, time
-import telegram_bot as tg
+import asyncio, aiohttp, aiofiles, os, json, uuid, heapq
+import telegram_bot.bot as tg
 import cloudscraper
 
 from dotenv import load_dotenv; load_dotenv()
@@ -22,6 +22,7 @@ slugs_data = {}
 
 last_notifications = {}
 last_diffs = {}
+full_scanned = False
 
 def custom_condition(collection, user_id):
     """Фильтрация коллекций по настройкам пользователей и проверка условий для отправки уведомлений"""
@@ -37,14 +38,16 @@ def custom_condition(collection, user_id):
     if collection["slug"] in cfg.blacklist: return False
     # Топ N по 1d объему
     if cfg.top_N_by_1d_volume < float('inf'):
+        if not full_scanned or 0 >= cfg.top_N_by_1d_volume: return False
+
         colls = [coll for coll in slugs_data.values() if coll.get("stats") is not None]
         top_N_by_1d_volume = heapq.nlargest(
             cfg.top_N_by_1d_volume,
             colls,
-            key=lambda coll: coll["stats"]["volume"]["usd"]
+            key=lambda coll: coll["stats"]["oneDay"]["volume"]["usd"]
         )
         if cfg.top_N_by_1d_volume \
-            and not any(d['name'] == collection['slug'] for d in top_N_by_1d_volume):
+            and not any(coll['slug'] == collection['slug'] for coll in top_N_by_1d_volume):
                 return False
     # Диапазон по 1d объему
     if not (cfg.min_USD_1d_volume <= collection["stats"]["volume"]["usd"] <= cfg.max_USD_1d_volume):
@@ -76,7 +79,7 @@ async def send_notifications(collection):
     for user_id, cfg in tg.configs.items():
         # Проверка кулдауна с последнего уведомления по notification_cooldown в config
         if cfg.notification_cooldown:
-            now = int(time.time())
+            now = asyncio.get_event_loop().time()
             prev_notification = last_notifications.setdefault(collection['slug'], {}).setdefault(user_id, 0)
             if now - prev_notification < cfg.notification_cooldown: continue
 
@@ -96,17 +99,17 @@ async def send_notifications(collection):
             floorPrice = get_native_price(collection, "floorPrice")
 
             try: 
-                await tg.bot.send_message(user_id, \
-                    
+                await tg.message_manager[user_id].add_message(
+
                     f"Collection - {collection['slug']}\n"
                     f"Price - {usd_price:.2f}$\n"
                     f"List - {topOffer['price']} {topOffer['currency']}\n"
                     f"Floor - {floorPrice['price']} {floorPrice['currency']}\n"
                     f"Diff - <b>{conditions['diff_percent_offer_to_floor']:.2f}%</b>\n"
                     f"opensea.io/collection/{collection['slug']}"
-
-                , parse_mode='HTML', disable_web_page_preview=True)
                 
+                )
+
                 if cfg.notification_cooldown: 
                     last_notifications[collection['slug']][user_id] = now
                 
@@ -117,7 +120,7 @@ async def send_notifications(collection):
 
 def filter_collections():
     
-    with open("collections_3.json", "r") as f:
+    with open("collections.json", "r") as f:
         collections = json.load(f)
     
     filtered = [c for c in collections if "0x" not in c]
@@ -127,6 +130,7 @@ def filter_collections():
 
 async def wrapper_get_all_collections():
     """Обертка для асинхронного вызова get_all_collections"""
+    global full_scanned
     loop = asyncio.get_event_loop()
     while True:
         temp_slugs_data = await asyncio.wait_for(
@@ -137,6 +141,8 @@ async def wrapper_get_all_collections():
         slugs_data.update(temp_slugs_data)
 
         await queue.put(list(temp_slugs_data.keys()))
+        
+        if not full_scanned: full_scanned = True
         
         for collection in temp_slugs_data.values():
             asyncio.create_task(send_notifications(collection))
@@ -150,9 +156,9 @@ def get_all_collections() -> dict:
     next_page = None
     variables = {
             "filter":{
-                "floorPriceRange"   : {"min": 0.001}, 
-                "hasMerchandising"  : False, 
-                "topOfferPriceRange": {"min": 0.001}
+                # "floorPriceRange"   : {"min": 0.001}, 
+                # "hasMerchandising"  : False, 
+                # "topOfferPriceRange": {"min": 0.001}
                 },
             "limit":100,
             "sort":{
@@ -163,20 +169,24 @@ def get_all_collections() -> dict:
     # spended = time.time()
     with cloudscraper.create_scraper() as scraper:
         while True:
-            # Делаем запрос пока не дойдем до конца страниц
-            if next_page: variables["cursor"] = next_page
+            try:
+                # Делаем запрос пока не дойдем до конца страниц
+                if next_page: variables["cursor"] = next_page
 
-            response = scraper.post('https://gql.opensea.io/graphql', json={"operationName":"TopStatsTableQuery","query":"query TopStatsTableQuery($cursor: String, $sort: TopCollectionsSort!, $filter: TopCollectionsFilter, $category: CategoryIdentifier, $limit: Int!) {\n  topCollections(\n    cursor: $cursor\n    sort: $sort\n    filter: $filter\n    category: $category\n    limit: $limit\n  ) {\n    items {\n      id\n      slug\n      __typename\n      ...StatsVolume\n      ...StatsTableRow\n      ...CollectionStatsSubscription\n      ...CollectionNativeCurrencyIdentifier\n    }\n    nextPageCursor\n    __typename\n  }\n}\nfragment StatsVolume on Collection {\n  stats {\n    volume {\n      native {\n        unit\n        __typename\n      }\n      ...Volume\n      __typename\n    }\n    oneMinute {\n      volume {\n        native {\n          unit\n          __typename\n        }\n        ...Volume\n        __typename\n      }\n      __typename\n    }\n    fifteenMinute {\n      volume {\n        native {\n          unit\n          __typename\n        }\n        ...Volume\n        __typename\n      }\n      __typename\n    }\n    fiveMinute {\n      volume {\n        native {\n          unit\n          __typename\n        }\n        ...Volume\n        __typename\n      }\n      __typename\n    }\n    oneDay {\n      volume {\n        native {\n          unit\n          __typename\n        }\n        ...Volume\n        __typename\n      }\n      __typename\n    }\n    oneHour {\n      volume {\n        native {\n          unit\n          __typename\n        }\n        ...Volume\n        __typename\n      }\n      __typename\n    }\n    sevenDays {\n      volume {\n        native {\n          unit\n          __typename\n        }\n        ...Volume\n        __typename\n      }\n      __typename\n    }\n    thirtyDays {\n      volume {\n        native {\n          unit\n          __typename\n        }\n        ...Volume\n        __typename\n      }\n      __typename\n    }\n    __typename\n  }\n  __typename\n}\nfragment Volume on Volume {\n  usd\n  native {\n    symbol\n    unit\n    __typename\n  }\n  __typename\n}\nfragment StatsTableRow on Collection {\n  id\n  slug\n  ...StatsTableRowFloorPrice\n  ...StatsTableRowTopOffer\n  ...StatsTableRowFloorChange\n  ...StatsTableRowOwners\n  ...StatsTableRowSales\n  ...StatsTableRowSupply\n  ...StatsTableRowVolume\n  ...StatsTableRowCollection\n  ...isRecentlyMinted\n  ...CollectionLink\n  ...CollectionPreviewTooltip\n  ...CollectionWatchListButton\n  ...StatsTableRowSparkLineChart\n  ...StatsTableRowFloorPriceMobile\n  __typename\n}\nfragment isRecentlyMinted on Collection {\n  createdAt\n  __typename\n}\nfragment CollectionLink on CollectionIdentifier {\n  slug\n  ... on Collection {\n    ...getDropStatus\n    __typename\n  }\n  __typename\n}\nfragment getDropStatus on Collection {\n  drop {\n    __typename\n    ... on Erc721SeaDropV1 {\n      maxSupply\n      totalSupply\n      __typename\n    }\n    ... on Erc1155SeaDropV2 {\n      tokenSupply {\n        totalSupply\n        maxSupply\n        __typename\n      }\n      __typename\n    }\n    stages {\n      startTime\n      endTime\n      __typename\n    }\n  }\n  __typename\n}\nfragment StatsTableRowFloorPrice on Collection {\n  floorPrice {\n    pricePerItem {\n      token {\n        unit\n        __typename\n      }\n      ...TokenPrice\n      __typename\n    }\n    __typename\n  }\n  __typename\n}\nfragment TokenPrice on Price {\n  usd\n  token {\n    unit\n    symbol\n    contractAddress\n    chain {\n      identifier\n      __typename\n    }\n    __typename\n  }\n  __typename\n}\nfragment StatsTableRowTopOffer on Collection {\n  topOffer {\n    pricePerItem {\n      token {\n        unit\n        __typename\n      }\n      ...TokenPrice\n      __typename\n    }\n    __typename\n  }\n  __typename\n}\nfragment StatsTableRowFloorChange on Collection {\n  stats {\n    oneMinute {\n      floorPriceChange\n      __typename\n    }\n    fiveMinute {\n      floorPriceChange\n      __typename\n    }\n    fifteenMinute {\n      floorPriceChange\n      __typename\n    }\n    oneDay {\n      floorPriceChange\n      __typename\n    }\n    oneHour {\n      floorPriceChange\n      __typename\n    }\n    sevenDays {\n      floorPriceChange\n      __typename\n    }\n    thirtyDays {\n      floorPriceChange\n      __typename\n    }\n    __typename\n  }\n  __typename\n}\nfragment StatsTableRowOwners on Collection {\n  stats {\n    ownerCount\n    __typename\n  }\n  __typename\n}\nfragment StatsTableRowSales on Collection {\n  stats {\n    sales\n    oneMinute {\n      sales\n      __typename\n    }\n    fiveMinute {\n      sales\n      __typename\n    }\n    fifteenMinute {\n      sales\n      __typename\n    }\n    oneDay {\n      sales\n      __typename\n    }\n    oneHour {\n      sales\n      __typename\n    }\n    sevenDays {\n      sales\n      __typename\n    }\n    thirtyDays {\n      sales\n      __typename\n    }\n    __typename\n  }\n  __typename\n}\nfragment StatsTableRowSupply on Collection {\n  stats {\n    totalSupply\n    __typename\n  }\n  __typename\n}\nfragment StatsTableRowVolume on Collection {\n  ...StatsVolume\n  __typename\n}\nfragment StatsTableRowCollection on Collection {\n  name\n  isVerified\n  ...CollectionImage\n  ...NewCollectionChip\n  ...CollectionPreviewTooltip\n  ...isRecentlyMinted\n  __typename\n}\nfragment CollectionPreviewTooltip on CollectionIdentifier {\n  ...CollectionPreviewTooltipContent\n  __typename\n}\nfragment CollectionPreviewTooltipContent on CollectionIdentifier {\n  slug\n  __typename\n}\nfragment CollectionImage on Collection {\n  name\n  imageUrl\n  chain {\n    ...ChainBadge\n    __typename\n  }\n  __typename\n}\nfragment ChainBadge on Chain {\n  identifier\n  name\n  __typename\n}\nfragment NewCollectionChip on Collection {\n  createdAt\n  ...isRecentlyMinted\n  __typename\n}\nfragment CollectionWatchListButton on Collection {\n  slug\n  name\n  __typename\n}\nfragment StatsTableRowSparkLineChart on Collection {\n  ...FloorPriceSparkLineChart\n  __typename\n}\nfragment FloorPriceSparkLineChart on Collection {\n  analytics {\n    sparkLineSevenDay {\n      price {\n        token {\n          unit\n          symbol\n          __typename\n        }\n        __typename\n      }\n      time\n      __typename\n    }\n    __typename\n  }\n  __typename\n}\nfragment StatsTableRowFloorPriceMobile on Collection {\n  ...StatsTableRowFloorPrice\n  ...StatsTableRowFloorChange\n  __typename\n}\nfragment CollectionStatsSubscription on Collection {\n  id\n  slug\n  __typename\n  floorPrice {\n    pricePerItem {\n      usd\n      ...TokenPrice\n      ...NativePrice\n      __typename\n    }\n    __typename\n  }\n  topOffer {\n    pricePerItem {\n      usd\n      ...TokenPrice\n      ...NativePrice\n      __typename\n    }\n    __typename\n  }\n  stats {\n    ownerCount\n    totalSupply\n    uniqueItemCount\n    listedItemCount\n    volume {\n      usd\n      ...Volume\n      __typename\n    }\n    sales\n    oneMinute {\n      floorPriceChange\n      sales\n      volume {\n        usd\n        ...Volume\n        __typename\n      }\n      __typename\n    }\n    fiveMinute {\n      floorPriceChange\n      sales\n      volume {\n        usd\n        ...Volume\n        __typename\n      }\n      __typename\n    }\n    fifteenMinute {\n      floorPriceChange\n      sales\n      volume {\n        usd\n        ...Volume\n        __typename\n      }\n      __typename\n    }\n    oneHour {\n      floorPriceChange\n      sales\n      volume {\n        usd\n        ...Volume\n        __typename\n      }\n      __typename\n    }\n    oneDay {\n      floorPriceChange\n      sales\n      volume {\n        usd\n        ...Volume\n        __typename\n      }\n      __typename\n    }\n    sevenDays {\n      floorPriceChange\n      sales\n      volume {\n        usd\n        ...Volume\n        __typename\n      }\n      __typename\n    }\n    thirtyDays {\n      floorPriceChange\n      sales\n      volume {\n        usd\n        ...Volume\n        __typename\n      }\n      __typename\n    }\n    __typename\n  }\n}\nfragment NativePrice on Price {\n  ...UsdPrice\n  token {\n    unit\n    contractAddress\n    ...currencyIdentifier\n    __typename\n  }\n  native {\n    symbol\n    unit\n    contractAddress\n    ...currencyIdentifier\n    __typename\n  }\n  __typename\n}\nfragment UsdPrice on Price {\n  usd\n  token {\n    contractAddress\n    unit\n    ...currencyIdentifier\n    __typename\n  }\n  __typename\n}\nfragment currencyIdentifier on ContractIdentifier {\n  contractAddress\n  chain {\n    identifier\n    __typename\n  }\n  __typename\n}\nfragment CollectionNativeCurrencyIdentifier on Collection {\n  chain {\n    identifier\n    nativeCurrency {\n      address\n      __typename\n    }\n    __typename\n  }\n  __typename\n}","variables": variables}).json()
+                response = scraper.post('https://gql.opensea.io/graphql', json={"operationName":"TopStatsTableQuery","query":"query TopStatsTableQuery($cursor: String, $sort: TopCollectionsSort!, $filter: TopCollectionsFilter, $category: CategoryIdentifier, $limit: Int!) {\n  topCollections(\n    cursor: $cursor\n    sort: $sort\n    filter: $filter\n    category: $category\n    limit: $limit\n  ) {\n    items {\n      id\n      slug\n      __typename\n      ...StatsVolume\n      ...StatsTableRow\n      ...CollectionStatsSubscription\n      ...CollectionNativeCurrencyIdentifier\n    }\n    nextPageCursor\n    __typename\n  }\n}\nfragment StatsVolume on Collection {\n  stats {\n    volume {\n      native {\n        unit\n        __typename\n      }\n      ...Volume\n      __typename\n    }\n    oneMinute {\n      volume {\n        native {\n          unit\n          __typename\n        }\n        ...Volume\n        __typename\n      }\n      __typename\n    }\n    fifteenMinute {\n      volume {\n        native {\n          unit\n          __typename\n        }\n        ...Volume\n        __typename\n      }\n      __typename\n    }\n    fiveMinute {\n      volume {\n        native {\n          unit\n          __typename\n        }\n        ...Volume\n        __typename\n      }\n      __typename\n    }\n    oneDay {\n      volume {\n        native {\n          unit\n          __typename\n        }\n        ...Volume\n        __typename\n      }\n      __typename\n    }\n    oneHour {\n      volume {\n        native {\n          unit\n          __typename\n        }\n        ...Volume\n        __typename\n      }\n      __typename\n    }\n    sevenDays {\n      volume {\n        native {\n          unit\n          __typename\n        }\n        ...Volume\n        __typename\n      }\n      __typename\n    }\n    thirtyDays {\n      volume {\n        native {\n          unit\n          __typename\n        }\n        ...Volume\n        __typename\n      }\n      __typename\n    }\n    __typename\n  }\n  __typename\n}\nfragment Volume on Volume {\n  usd\n  native {\n    symbol\n    unit\n    __typename\n  }\n  __typename\n}\nfragment StatsTableRow on Collection {\n  id\n  slug\n  ...StatsTableRowFloorPrice\n  ...StatsTableRowTopOffer\n  ...StatsTableRowFloorChange\n  ...StatsTableRowOwners\n  ...StatsTableRowSales\n  ...StatsTableRowSupply\n  ...StatsTableRowVolume\n  ...StatsTableRowCollection\n  ...isRecentlyMinted\n  ...CollectionLink\n  ...CollectionPreviewTooltip\n  ...CollectionWatchListButton\n  ...StatsTableRowSparkLineChart\n  ...StatsTableRowFloorPriceMobile\n  __typename\n}\nfragment isRecentlyMinted on Collection {\n  createdAt\n  __typename\n}\nfragment CollectionLink on CollectionIdentifier {\n  slug\n  ... on Collection {\n    ...getDropStatus\n    __typename\n  }\n  __typename\n}\nfragment getDropStatus on Collection {\n  drop {\n    __typename\n    ... on Erc721SeaDropV1 {\n      maxSupply\n      totalSupply\n      __typename\n    }\n    ... on Erc1155SeaDropV2 {\n      tokenSupply {\n        totalSupply\n        maxSupply\n        __typename\n      }\n      __typename\n    }\n    stages {\n      startTime\n      endTime\n      __typename\n    }\n  }\n  __typename\n}\nfragment StatsTableRowFloorPrice on Collection {\n  floorPrice {\n    pricePerItem {\n      token {\n        unit\n        __typename\n      }\n      ...TokenPrice\n      __typename\n    }\n    __typename\n  }\n  __typename\n}\nfragment TokenPrice on Price {\n  usd\n  token {\n    unit\n    symbol\n    contractAddress\n    chain {\n      identifier\n      __typename\n    }\n    __typename\n  }\n  __typename\n}\nfragment StatsTableRowTopOffer on Collection {\n  topOffer {\n    pricePerItem {\n      token {\n        unit\n        __typename\n      }\n      ...TokenPrice\n      __typename\n    }\n    __typename\n  }\n  __typename\n}\nfragment StatsTableRowFloorChange on Collection {\n  stats {\n    oneMinute {\n      floorPriceChange\n      __typename\n    }\n    fiveMinute {\n      floorPriceChange\n      __typename\n    }\n    fifteenMinute {\n      floorPriceChange\n      __typename\n    }\n    oneDay {\n      floorPriceChange\n      __typename\n    }\n    oneHour {\n      floorPriceChange\n      __typename\n    }\n    sevenDays {\n      floorPriceChange\n      __typename\n    }\n    thirtyDays {\n      floorPriceChange\n      __typename\n    }\n    __typename\n  }\n  __typename\n}\nfragment StatsTableRowOwners on Collection {\n  stats {\n    ownerCount\n    __typename\n  }\n  __typename\n}\nfragment StatsTableRowSales on Collection {\n  stats {\n    sales\n    oneMinute {\n      sales\n      __typename\n    }\n    fiveMinute {\n      sales\n      __typename\n    }\n    fifteenMinute {\n      sales\n      __typename\n    }\n    oneDay {\n      sales\n      __typename\n    }\n    oneHour {\n      sales\n      __typename\n    }\n    sevenDays {\n      sales\n      __typename\n    }\n    thirtyDays {\n      sales\n      __typename\n    }\n    __typename\n  }\n  __typename\n}\nfragment StatsTableRowSupply on Collection {\n  stats {\n    totalSupply\n    __typename\n  }\n  __typename\n}\nfragment StatsTableRowVolume on Collection {\n  ...StatsVolume\n  __typename\n}\nfragment StatsTableRowCollection on Collection {\n  name\n  isVerified\n  ...CollectionImage\n  ...NewCollectionChip\n  ...CollectionPreviewTooltip\n  ...isRecentlyMinted\n  __typename\n}\nfragment CollectionPreviewTooltip on CollectionIdentifier {\n  ...CollectionPreviewTooltipContent\n  __typename\n}\nfragment CollectionPreviewTooltipContent on CollectionIdentifier {\n  slug\n  __typename\n}\nfragment CollectionImage on Collection {\n  name\n  imageUrl\n  chain {\n    ...ChainBadge\n    __typename\n  }\n  __typename\n}\nfragment ChainBadge on Chain {\n  identifier\n  name\n  __typename\n}\nfragment NewCollectionChip on Collection {\n  createdAt\n  ...isRecentlyMinted\n  __typename\n}\nfragment CollectionWatchListButton on Collection {\n  slug\n  name\n  __typename\n}\nfragment StatsTableRowSparkLineChart on Collection {\n  ...FloorPriceSparkLineChart\n  __typename\n}\nfragment FloorPriceSparkLineChart on Collection {\n  analytics {\n    sparkLineSevenDay {\n      price {\n        token {\n          unit\n          symbol\n          __typename\n        }\n        __typename\n      }\n      time\n      __typename\n    }\n    __typename\n  }\n  __typename\n}\nfragment StatsTableRowFloorPriceMobile on Collection {\n  ...StatsTableRowFloorPrice\n  ...StatsTableRowFloorChange\n  __typename\n}\nfragment CollectionStatsSubscription on Collection {\n  id\n  slug\n  __typename\n  floorPrice {\n    pricePerItem {\n      usd\n      ...TokenPrice\n      ...NativePrice\n      __typename\n    }\n    __typename\n  }\n  topOffer {\n    pricePerItem {\n      usd\n      ...TokenPrice\n      ...NativePrice\n      __typename\n    }\n    __typename\n  }\n  stats {\n    ownerCount\n    totalSupply\n    uniqueItemCount\n    listedItemCount\n    volume {\n      usd\n      ...Volume\n      __typename\n    }\n    sales\n    oneMinute {\n      floorPriceChange\n      sales\n      volume {\n        usd\n        ...Volume\n        __typename\n      }\n      __typename\n    }\n    fiveMinute {\n      floorPriceChange\n      sales\n      volume {\n        usd\n        ...Volume\n        __typename\n      }\n      __typename\n    }\n    fifteenMinute {\n      floorPriceChange\n      sales\n      volume {\n        usd\n        ...Volume\n        __typename\n      }\n      __typename\n    }\n    oneHour {\n      floorPriceChange\n      sales\n      volume {\n        usd\n        ...Volume\n        __typename\n      }\n      __typename\n    }\n    oneDay {\n      floorPriceChange\n      sales\n      volume {\n        usd\n        ...Volume\n        __typename\n      }\n      __typename\n    }\n    sevenDays {\n      floorPriceChange\n      sales\n      volume {\n        usd\n        ...Volume\n        __typename\n      }\n      __typename\n    }\n    thirtyDays {\n      floorPriceChange\n      sales\n      volume {\n        usd\n        ...Volume\n        __typename\n      }\n      __typename\n    }\n    __typename\n  }\n}\nfragment NativePrice on Price {\n  ...UsdPrice\n  token {\n    unit\n    contractAddress\n    ...currencyIdentifier\n    __typename\n  }\n  native {\n    symbol\n    unit\n    contractAddress\n    ...currencyIdentifier\n    __typename\n  }\n  __typename\n}\nfragment UsdPrice on Price {\n  usd\n  token {\n    contractAddress\n    unit\n    ...currencyIdentifier\n    __typename\n  }\n  __typename\n}\nfragment currencyIdentifier on ContractIdentifier {\n  contractAddress\n  chain {\n    identifier\n    __typename\n  }\n  __typename\n}\nfragment CollectionNativeCurrencyIdentifier on Collection {\n  chain {\n    identifier\n    nativeCurrency {\n      address\n      __typename\n    }\n    __typename\n  }\n  __typename\n}","variables": variables}).json()
 
-            # Формируем данные коллекций
-            for item in response["data"]["topCollections"]["items"]:
-                temp_slugs_data[item['slug']] = item
+                # Формируем данные коллекций
+                for item in response["data"]["topCollections"]["items"]:
+                    temp_slugs_data[item['slug']] = item
 
-            next_page = response["data"]["topCollections"]["nextPageCursor"]
+                next_page = response["data"]["topCollections"]["nextPageCursor"]
 
-            # logger.debug(f"{next_page} {len(temp_slugs_data)} {(time.time() - spended)*1000:.2f} ms")
-            # spended = time.time()
-            if not next_page: return temp_slugs_data
+                # logger.debug(f"{next_page} {len(temp_slugs_data)} {(time.time() - spended)*1000:.2f} ms")
+                # spended = time.time()
+                if not next_page: return temp_slugs_data
+            except Exception as e:
+                logger.error(f"Error fetching collections: {e}")
+                next_page = None
     
         
 
@@ -211,9 +221,14 @@ async def manage_connections(ws: aiohttp.ClientWebSocketResponse):
             
             subs.update(to_sub)
             batch_size = 200
+            try:
+                async with aiofiles.open("collections.json", "w") as f:
+                    await f.write(json.dumps(list(subs), separators=(',', ':')))
+            except Exception:
+                pass
             await asyncio.gather(*[ws.send_json({"id": str(uuid.uuid4()), "type": "subscribe", "payload": {"query": "subscription useCollectionStatsSubscription($slugs: [String!]!) {\n collectionsBySlugs(slugs: $slugs) {\n __typename\n ... on DelistedCollection {\n id\n __typename\n }\n ... on BlacklistedCollection {\n id\n __typename\n }\n ... on Collection {\n id\n slug\n ...CollectionStatsSubscription\n __typename\n }\n }\n}\nfragment CollectionStatsSubscription on Collection {\n id\n slug\n __typename\n floorPrice {\n pricePerItem {\n usd\n ...TokenPrice\n ...NativePrice\n __typename\n }\n __typename\n }\n topOffer {\n pricePerItem {\n usd\n ...TokenPrice\n ...NativePrice\n __typename\n }\n __typename\n }\n stats {\n ownerCount\n totalSupply\n uniqueItemCount\n listedItemCount\n volume {\n usd\n ...Volume\n __typename\n }\n sales\n oneMinute {\n floorPriceChange\n sales\n volume {\n usd\n ...Volume\n __typename\n }\n __typename\n }\n fiveMinute {\n floorPriceChange\n sales\n volume {\n usd\n ...Volume\n __typename\n }\n __typename\n }\n fifteenMinute {\n floorPriceChange\n sales\n volume {\n usd\n ...Volume\n __typename\n }\n __typename\n }\n oneHour {\n floorPriceChange\n sales\n volume {\n usd\n ...Volume\n __typename\n }\n __typename\n }\n oneDay {\n floorPriceChange\n sales\n volume {\n usd\n ...Volume\n __typename\n }\n __typename\n }\n sevenDays {\n floorPriceChange\n sales\n volume {\n usd\n ...Volume\n __typename\n }\n __typename\n }\n thirtyDays {\n floorPriceChange\n sales\n volume {\n usd\n ...Volume\n __typename\n }\n __typename\n }\n __typename\n }\n}\nfragment Volume on Volume {\n usd\n native {\n symbol\n unit\n __typename\n }\n __typename\n}\nfragment NativePrice on Price {\n ...UsdPrice\n token {\n unit\n contractAddress\n ...currencyIdentifier\n __typename\n }\n native {\n symbol\n unit\n contractAddress\n ...currencyIdentifier\n __typename\n }\n __typename\n}\nfragment UsdPrice on Price {\n usd\n token {\n contractAddress\n unit\n ...currencyIdentifier\n __typename\n }\n __typename\n}\nfragment currencyIdentifier on ContractIdentifier {\n contractAddress\n chain {\n identifier\n __typename\n }\n __typename\n}\nfragment TokenPrice on Price {\n usd\n token {\n unit\n symbol\n contractAddress\n chain {\n identifier\n __typename\n }\n __typename\n }\n __typename\n}","operationName": "useCollectionStatsSubscription", "variables": {"slugs": to_sub[i:i+batch_size]}}}) for i in range(0, len(to_sub), batch_size) if to_sub[i:i+batch_size]])
             logger.info(f"Subscribed to {len(to_sub)} collections.")
-                # await asyncio.sleep(1)
+            await asyncio.sleep(1)
     except asyncio.CancelledError:
         logger.info("Connection manager cancelled.")
 
@@ -233,7 +248,11 @@ async def run_ws():
                     collection_manager = asyncio.create_task(manage_connections(ws))
                     while not queue._getters:
                         await asyncio.sleep(0.1)
-                    await queue.put(list(slugs_data.keys()))
+                    try:
+                        async with aiofiles.open("collections.json", "r") as f:
+                            await queue.put(json.loads(await f.read()))
+                    except:
+                        await queue.put(list(slugs_data.keys()))
 
                     # Слушаем сообщения
                     async for msg in ws:
@@ -245,13 +264,13 @@ async def run_ws():
                             
                             collection = msg_data["payload"]["data"]["collectionsBySlugs"]
                             if collection and (slug := collection.get("slug")):
-
+                                if slug not in slugs_data: slugs_data[slug] = collection
                                 # Получаем цены
                                 floorPrice     = get_usd_price(collection, "floorPrice")
                                 topOffer       = get_usd_price(collection, "topOffer")
                                 old_floorPrice = get_usd_price(slugs_data[slug], "floorPrice")
                                 old_topOffer   = get_usd_price(slugs_data[slug], "topOffer")
-                                # Запись в кэш
+                                # Запись в кэш если отличаются от старых значений
                                 if slug in slugs_data \
                                     and old_floorPrice == floorPrice \
                                     and old_topOffer == topOffer:

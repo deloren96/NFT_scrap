@@ -5,6 +5,8 @@ from aiogram import Bot, Dispatcher, Router
 from aiogram.types import Message
 from aiogram.filters import CommandStart
 
+from telegram_bot.message_manager import MessageManager
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 from dotenv import load_dotenv; load_dotenv()
@@ -15,6 +17,7 @@ bot = Bot(token=TG_BOT_TOKEN)
 dp = Dispatcher()
 dp.include_router(router)
 
+message_manager: dict[int, MessageManager] = {}
 
 class Config():
     def __init__(self, import_config=None):
@@ -40,13 +43,18 @@ class Config():
 
 configs  : dict[int, Config] = {}
 
+def init_message_manager():
+    for chat_id in configs.keys():
+        if chat_id not in message_manager:
+            message_manager[chat_id] = MessageManager(chat_id, bot.send_message, parse_mode='HTML', disable_web_page_preview=True)
+
 async def load_configs():
     global configs
     try:
         async with aiofiles.open("configs.json", "r") as f:
             configs = { int(user_id) : Config(cfg) for user_id, cfg in json.loads((await f.read())).items() }
-
-            logger.debug(f"Loaded configs: {configs.keys()}")
+        init_message_manager()
+        logger.debug(f"Loaded configs: {configs.keys()}")
 
     except Exception as e:
         configs = {}
@@ -65,10 +73,11 @@ async def cmd_start(message: Message):
         await message.answer("Вы уже подписаны на уведомления. Хотите сбросить настройки?")
 
 
+
 async def start_bot():
 
     await load_configs()
-    
+
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
