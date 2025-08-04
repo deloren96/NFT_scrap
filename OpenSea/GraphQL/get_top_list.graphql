@@ -1,0 +1,525 @@
+query TopStatsTableQuery($cursor: String, $sort: TopCollectionsSort!, $filter: TopCollectionsFilter, $category: CategoryIdentifier, $limit: Int!) {
+  topCollections(
+    cursor: $cursor
+    sort: $sort
+    filter: $filter
+    category: $category
+    limit: $limit
+  ) {
+    items {
+      id
+      slug
+      __typename
+      ...StatsVolume
+      ...StatsTableRow
+      ...CollectionStatsSubscription
+      ...CollectionNativeCurrencyIdentifier
+    }
+    nextPageCursor
+    __typename
+  }
+}
+fragment StatsVolume on Collection {
+  stats {
+    volume {
+      native {
+        unit
+        __typename
+      }
+      ...Volume
+      __typename
+    }
+    oneMinute {
+      volume {
+        native {
+          unit
+          __typename
+        }
+        ...Volume
+        __typename
+      }
+      __typename
+    }
+    fifteenMinute {
+      volume {
+        native {
+          unit
+          __typename
+        }
+        ...Volume
+        __typename
+      }
+      __typename
+    }
+    fiveMinute {
+      volume {
+        native {
+          unit
+          __typename
+        }
+        ...Volume
+        __typename
+      }
+      __typename
+    }
+    oneDay {
+      volume {
+        native {
+          unit
+          __typename
+        }
+        ...Volume
+        __typename
+      }
+      __typename
+    }
+    oneHour {
+      volume {
+        native {
+          unit
+          __typename
+        }
+        ...Volume
+        __typename
+      }
+      __typename
+    }
+    sevenDays {
+      volume {
+        native {
+          unit
+          __typename
+        }
+        ...Volume
+        __typename
+      }
+      __typename
+    }
+    thirtyDays {
+      volume {
+        native {
+          unit
+          __typename
+        }
+        ...Volume
+        __typename
+      }
+      __typename
+    }
+    __typename
+  }
+  __typename
+}
+fragment Volume on Volume {
+  usd
+  native {
+    symbol
+    unit
+    __typename
+  }
+  __typename
+}
+fragment StatsTableRow on Collection {
+  id
+  slug
+  ...StatsTableRowFloorPrice
+  ...StatsTableRowTopOffer
+  ...StatsTableRowFloorChange
+  ...StatsTableRowOwners
+  ...StatsTableRowSales
+  ...StatsTableRowSupply
+  ...StatsTableRowVolume
+  ...StatsTableRowCollection
+  ...isRecentlyMinted
+  ...CollectionLink
+  ...CollectionPreviewTooltip
+  ...CollectionWatchListButton
+  ...StatsTableRowSparkLineChart
+  ...StatsTableRowFloorPriceMobile
+  __typename
+}
+fragment isRecentlyMinted on Collection {
+  createdAt
+  __typename
+}
+fragment CollectionLink on CollectionIdentifier {
+  slug
+  ... on Collection {
+    ...getDropStatus
+    __typename
+  }
+  __typename
+}
+fragment getDropStatus on Collection {
+  drop {
+    __typename
+    ... on Erc721SeaDropV1 {
+      maxSupply
+      totalSupply
+      __typename
+    }
+    ... on Erc1155SeaDropV2 {
+      tokenSupply {
+        totalSupply
+        maxSupply
+        __typename
+      }
+      __typename
+    }
+    stages {
+      startTime
+      endTime
+      __typename
+    }
+  }
+  __typename
+}
+fragment StatsTableRowFloorPrice on Collection {
+  floorPrice {
+    pricePerItem {
+      token {
+        unit
+        __typename
+      }
+      ...TokenPrice
+      __typename
+    }
+    __typename
+  }
+  __typename
+}
+fragment TokenPrice on Price {
+  usd
+  token {
+    unit
+    symbol
+    contractAddress
+    chain {
+      identifier
+      __typename
+    }
+    __typename
+  }
+  __typename
+}
+fragment StatsTableRowTopOffer on Collection {
+  topOffer {
+    pricePerItem {
+      token {
+        unit
+        __typename
+      }
+      ...TokenPrice
+      __typename
+    }
+    __typename
+  }
+  __typename
+}
+fragment StatsTableRowFloorChange on Collection {
+  stats {
+    oneMinute {
+      floorPriceChange
+      __typename
+    }
+    fiveMinute {
+      floorPriceChange
+      __typename
+    }
+    fifteenMinute {
+      floorPriceChange
+      __typename
+    }
+    oneDay {
+      floorPriceChange
+      __typename
+    }
+    oneHour {
+      floorPriceChange
+      __typename
+    }
+    sevenDays {
+      floorPriceChange
+      __typename
+    }
+    thirtyDays {
+      floorPriceChange
+      __typename
+    }
+    __typename
+  }
+  __typename
+}
+fragment StatsTableRowOwners on Collection {
+  stats {
+    ownerCount
+    __typename
+  }
+  __typename
+}
+fragment StatsTableRowSales on Collection {
+  stats {
+    sales
+    oneMinute {
+      sales
+      __typename
+    }
+    fiveMinute {
+      sales
+      __typename
+    }
+    fifteenMinute {
+      sales
+      __typename
+    }
+    oneDay {
+      sales
+      __typename
+    }
+    oneHour {
+      sales
+      __typename
+    }
+    sevenDays {
+      sales
+      __typename
+    }
+    thirtyDays {
+      sales
+      __typename
+    }
+    __typename
+  }
+  __typename
+}
+fragment StatsTableRowSupply on Collection {
+  stats {
+    totalSupply
+    __typename
+  }
+  __typename
+}
+fragment StatsTableRowVolume on Collection {
+  ...StatsVolume
+  __typename
+}
+fragment StatsTableRowCollection on Collection {
+  name
+  isVerified
+  ...CollectionImage
+  ...NewCollectionChip
+  ...CollectionPreviewTooltip
+  ...isRecentlyMinted
+  __typename
+}
+fragment CollectionPreviewTooltip on CollectionIdentifier {
+  ...CollectionPreviewTooltipContent
+  __typename
+}
+fragment CollectionPreviewTooltipContent on CollectionIdentifier {
+  slug
+  __typename
+}
+fragment CollectionImage on Collection {
+  name
+  imageUrl
+  chain {
+    ...ChainBadge
+    __typename
+  }
+  __typename
+}
+fragment ChainBadge on Chain {
+  identifier
+  name
+  __typename
+}
+fragment NewCollectionChip on Collection {
+  createdAt
+  ...isRecentlyMinted
+  __typename
+}
+fragment CollectionWatchListButton on Collection {
+  slug
+  name
+  __typename
+}
+fragment StatsTableRowSparkLineChart on Collection {
+  ...FloorPriceSparkLineChart
+  __typename
+}
+fragment FloorPriceSparkLineChart on Collection {
+  analytics {
+    sparkLineSevenDay {
+      price {
+        token {
+          unit
+          symbol
+          __typename
+        }
+        __typename
+      }
+      time
+      __typename
+    }
+    __typename
+  }
+  __typename
+}
+fragment StatsTableRowFloorPriceMobile on Collection {
+  ...StatsTableRowFloorPrice
+  ...StatsTableRowFloorChange
+  __typename
+}
+fragment CollectionStatsSubscription on Collection {
+  id
+  slug
+  __typename
+  floorPrice {
+    pricePerItem {
+      usd
+      ...TokenPrice
+      ...NativePrice
+      __typename
+    }
+    __typename
+  }
+  topOffer {
+    pricePerItem {
+      usd
+      ...TokenPrice
+      ...NativePrice
+      __typename
+    }
+    __typename
+  }
+  stats {
+    ownerCount
+    totalSupply
+    uniqueItemCount
+    listedItemCount
+    volume {
+      usd
+      ...Volume
+      __typename
+    }
+    sales
+    oneMinute {
+      floorPriceChange
+      sales
+      volume {
+        usd
+        ...Volume
+        __typename
+      }
+      __typename
+    }
+    fiveMinute {
+      floorPriceChange
+      sales
+      volume {
+        usd
+        ...Volume
+        __typename
+      }
+      __typename
+    }
+    fifteenMinute {
+      floorPriceChange
+      sales
+      volume {
+        usd
+        ...Volume
+        __typename
+      }
+      __typename
+    }
+    oneHour {
+      floorPriceChange
+      sales
+      volume {
+        usd
+        ...Volume
+        __typename
+      }
+      __typename
+    }
+    oneDay {
+      floorPriceChange
+      sales
+      volume {
+        usd
+        ...Volume
+        __typename
+      }
+      __typename
+    }
+    sevenDays {
+      floorPriceChange
+      sales
+      volume {
+        usd
+        ...Volume
+        __typename
+      }
+      __typename
+    }
+    thirtyDays {
+      floorPriceChange
+      sales
+      volume {
+        usd
+        ...Volume
+        __typename
+      }
+      __typename
+    }
+    __typename
+  }
+}
+fragment NativePrice on Price {
+  ...UsdPrice
+  token {
+    unit
+    contractAddress
+    ...currencyIdentifier
+    __typename
+  }
+  native {
+    symbol
+    unit
+    contractAddress
+    ...currencyIdentifier
+    __typename
+  }
+  __typename
+}
+fragment UsdPrice on Price {
+  usd
+  token {
+    contractAddress
+    unit
+    ...currencyIdentifier
+    __typename
+  }
+  __typename
+}
+fragment currencyIdentifier on ContractIdentifier {
+  contractAddress
+  chain {
+    identifier
+    __typename
+  }
+  __typename
+}
+fragment CollectionNativeCurrencyIdentifier on Collection {
+  chain {
+    identifier
+    nativeCurrency {
+      address
+      __typename
+    }
+    __typename
+  }
+  __typename
+}

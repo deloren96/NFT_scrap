@@ -1,7 +1,7 @@
 import logging
 
 import asyncio
-from collections import deque, defaultdict
+from collections import deque
 
 from aiogram.exceptions import TelegramRetryAfter
 logging.basicConfig(level=logging.DEBUG)
@@ -12,7 +12,7 @@ log = logging.getLogger(__name__)
 class MessageManager:
     """Менеджер, который распределяет отправку сообщений согласно лимитам Telegram Bot API."""
 
-    def __init__(s, chat_id: int,send_message: callable, *args, **kwargs):
+    def __init__(self, chat_id: int, send_message: callable, *args, **kwargs):
         """
         Инициализация менеджера сообщений.
 
@@ -20,80 +20,80 @@ class MessageManager:
         :param args: дополнительные аргументы для send_message.
         :param kwargs: дополнительные ключевые аргументы для send_message.
         """
-        s._send_message = send_message
-        s.args = args
-        s.kwargs = kwargs
+        self._send_message = send_message
+        self.args = args
+        self.kwargs = kwargs
 
-        s.chat_id = chat_id
+        self.chat_id = chat_id
 
-        s.messages = []
+        self.messages = []
 
-        s.cooldown = 10
+        self.cooldown = 10
 
-        s.TIME_WINDOW = 5 # seconds
-        s.MESSAGES_LIMIT = s.TIME_WINDOW * 2
-        s.BASE_DELAY = 0.3 # seconds
-        s.MAX_DELAY = 1.0 # seconds
-        s.current_delay = s.BASE_DELAY
+        self.TIME_WINDOW = 5 # seconds
+        self.MESSAGES_LIMIT = self.TIME_WINDOW * 2
+        self.BASE_DELAY = 0.3 # seconds
+        self.MAX_DELAY = 1.0 # seconds
+        self.current_delay = self.BASE_DELAY
 
-        s.message_timestamps = deque()
-        s.recent_messages_timestamps: deque[float] = deque()
+        self.message_timestamps = deque()
+        self.recent_messages_timestamps: deque[float] = deque()
 
-        s.flood_control: float = 0.0
+        self.flood_control: float = 0.0
 
-        s.queue = asyncio.Queue()
-        s.chat_task = asyncio.create_task(s.process_chat_queue())
+        self.queue = asyncio.Queue()
+        self.chat_task = asyncio.create_task(self.process_chat_queue())
 
 
 
-    async def send_message(s, message):
+    async def send_message(self, message):
         try:
 
-            await s._send_message(s.chat_id, message, *s.args, **s.kwargs)
+            await self._send_message(self.chat_id, message, *self.args, **self.kwargs)
             now = asyncio.get_running_loop().time()
-            s.recent_messages_timestamps.append(now)
+            self.recent_messages_timestamps.append(now)
 
         except TelegramRetryAfter as exception:
 
-            await s.queue.put(message)
+            await self.queue.put(message)
 
             now = asyncio.get_running_loop().time()
-            s.flood_control = now + exception.retry_after
+            self.flood_control = now + exception.retry_after
 
-            log.warning(f"Flood control: {s.chat_id} попробуйте снова через {exception.retry_after} секунд")
+            log.warning(f"Flood control: {self.chat_id} попробуйте снова через {exception.retry_after} секунд")
 
         except Exception as exception:
 
-            log.error(f"Error sending message to {s.chat_id}: {exception}")
+            log.error(f"Error sending message to {self.chat_id}: {exception}")
 
 
 
-    def gather_messages(s):
-        while not s.queue.empty():
+    def gather_messages(self):
+        while not self.queue.empty():
             try:
-                s.messages.append(s.queue.get_nowait())
+                self.messages.append(self.queue.get_nowait())
             except asyncio.QueueEmpty:
                 break
 
 
 
-    async def add_message(s, message):
-        log.debug(f"Adding message to {s.chat_id}")
-        await s.queue.put(message)
+    async def add_message(self, message):
+        log.debug(f"Adding message to {self.chat_id}")
+        await self.queue.put(message)
 
 
 
-    async def clean_timestamps(s):
+    async def clean_timestamps(self):
 
         now = asyncio.get_running_loop().time()
-        timestamps = s.recent_messages_timestamps
+        timestamps = self.recent_messages_timestamps
 
-        while timestamps and (now - timestamps[0]) > s.TIME_WINDOW:
+        while timestamps and (now - timestamps[0]) > self.TIME_WINDOW:
             timestamps.popleft()
 
 
 
-    async def wait_delay(s, end_timestamp: float):
+    async def wait_delay(self, end_timestamp: float):
         """Останавливает весь цикл, и все сообщения накапливаются в очередь."""
 
         now = asyncio.get_running_loop().time()
@@ -103,12 +103,12 @@ class MessageManager:
 
 
 
-    async def combine_messages(s) -> str:
+    async def combine_messages(self) -> str:
         combined_message = ""
         max_length = 4096
         slice = 0
 
-        for message in s.messages:
+        for message in self.messages:
 
             spacing = 2 if combined_message else 0
             if len(combined_message) + spacing + len(message) > max_length:
@@ -120,54 +120,55 @@ class MessageManager:
 
             slice += 1
 
-        s.messages = s.messages[slice:]
+        self.messages = self.messages[slice:]
         return combined_message
 
 
 
-    async def control_messages_speed(s):
-        timestamps = s.recent_messages_timestamps
+    async def control_messages_speed(self):
+        timestamps = self.recent_messages_timestamps
 
-        await s.clean_timestamps()
-        s.current_delay = s.MAX_DELAY if len(timestamps) >= s.MESSAGES_LIMIT else s.BASE_DELAY
+        await self.clean_timestamps()
+        self.current_delay = self.MAX_DELAY if len(timestamps) >= self.MESSAGES_LIMIT else self.BASE_DELAY
 
         last_timestamp = timestamps[-1] if timestamps else 0
         end_timestamp = max([
             0,
-            last_timestamp + s.current_delay,
-            s.flood_control
+            last_timestamp + self.current_delay,
+            self.flood_control
         ])
 
         return end_timestamp
 
 
 
-    async def process_chat_queue(s):
+    async def process_chat_queue(self):
+        
         while True:
 
-            
-            if len(s.messages) > 0 and s.queue.empty():
-                log.debug(f"{s.chat_id if s.chat_id==857039354 else ''} No queued messages, only cached. {len(s.messages)}")
+
+            if len(self.messages) > 0 and self.queue.empty():
+                log.debug(f"{self.chat_id if self.chat_id==857039354 else ''} No queued messages, only cached. {len(self.messages)}")
             else:
-                log.debug(f"{s.chat_id} Processing queue. {s.queue.qsize()} messages in queue, {len(s.messages)} cached messages")
-                s.messages.append(await s.queue.get())
+                log.debug(f"{self.chat_id} Processing queue. {self.queue.qsize()} messages in queue, {len(self.messages)} cached messages")
+                self.messages.append(await self.queue.get())
             
-            if s.flood_control:
-                log.debug(f"{s.chat_id} Flood control active, waiting until {s.flood_control}")
-                await s.wait_delay(s.flood_control)
-                s.gather_messages()
-                s.messages.clear()
-                s.flood_control = 0.0
+            if self.flood_control:
+                log.debug(f"{self.chat_id} Flood control active, waiting until {self.flood_control}")
+                await self.wait_delay(self.flood_control)
+                self.gather_messages()
+                self.messages.clear()
+                self.flood_control = 0.0
                 continue
             
 
-            end_timestamp = await s.control_messages_speed()
+            end_timestamp = await self.control_messages_speed()
 
-            await s.wait_delay(end_timestamp)
-            s.gather_messages()
-            combined_message = await s.combine_messages()
+            await self.wait_delay(end_timestamp)
+            self.gather_messages()
+            combined_message = await self.combine_messages()
             if combined_message:
-                await s.send_message(combined_message)
+                await self.send_message(combined_message)
 
 
 

@@ -1,0 +1,183 @@
+subscription useCollectionStatsSubscription($slugs: [String!]!) {
+ collectionsBySlugs(slugs: $slugs) {
+ __typename
+ ... on DelistedCollection {
+ id
+ __typename
+ }
+ ... on BlacklistedCollection {
+ id
+ __typename
+ }
+ ... on Collection {
+ id
+ slug
+ ...CollectionStatsSubscription
+ __typename
+ }
+ }
+}
+fragment CollectionStatsSubscription on Collection {
+ id
+ slug
+ __typename
+ floorPrice {
+ pricePerItem {
+ usd
+ ...TokenPrice
+ ...NativePrice
+ __typename
+ }
+ __typename
+ }
+ topOffer {
+ pricePerItem {
+ usd
+ ...TokenPrice
+ ...NativePrice
+ __typename
+ }
+ __typename
+ }
+ stats {
+ ownerCount
+ totalSupply
+ uniqueItemCount
+ listedItemCount
+ volume {
+ usd
+ ...Volume
+ __typename
+ }
+ sales
+ oneMinute {
+ floorPriceChange
+ sales
+ volume {
+ usd
+ ...Volume
+ __typename
+ }
+ __typename
+ }
+ fiveMinute {
+ floorPriceChange
+ sales
+ volume {
+ usd
+ ...Volume
+ __typename
+ }
+ __typename
+ }
+ fifteenMinute {
+ floorPriceChange
+ sales
+ volume {
+ usd
+ ...Volume
+ __typename
+ }
+ __typename
+ }
+ oneHour {
+ floorPriceChange
+ sales
+ volume {
+ usd
+ ...Volume
+ __typename
+ }
+ __typename
+ }
+ oneDay {
+ floorPriceChange
+ sales
+ volume {
+ usd
+ ...Volume
+ __typename
+ }
+ __typename
+ }
+ sevenDays {
+ floorPriceChange
+ sales
+ volume {
+ usd
+ ...Volume
+ __typename
+ }
+ __typename
+ }
+ thirtyDays {
+ floorPriceChange
+ sales
+ volume {
+ usd
+ ...Volume
+ __typename
+ }
+ __typename
+ }
+ __typename
+ }
+}
+fragment Volume on Volume {
+ usd
+ native {
+ symbol
+ unit
+ __typename
+ }
+ __typename
+}
+fragment NativePrice on Price {
+ ...UsdPrice
+ token {
+ unit
+ contractAddress
+ ...currencyIdentifier
+ __typename
+ }
+ native {
+ symbol
+ unit
+ contractAddress
+ ...currencyIdentifier
+ __typename
+ }
+ __typename
+}
+fragment UsdPrice on Price {
+ usd
+ token {
+ contractAddress
+ unit
+ ...currencyIdentifier
+ __typename
+ }
+ __typename
+}
+fragment currencyIdentifier on ContractIdentifier {
+ contractAddress
+ chain {
+ identifier
+ __typename
+ }
+ __typename
+}
+fragment TokenPrice on Price {
+ usd
+ token {
+ unit
+ symbol
+ contractAddress
+ chain {
+ identifier
+ __typename
+ }
+ __typename
+ }
+ __typename
+}
