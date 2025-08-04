@@ -234,7 +234,6 @@ async def manage_connections(ws: aiohttp.ClientWebSocketResponse):
 
 async def run_ws():
     """Подключается к WebSocket OpenSea и отслеживает изменения в коллекциях"""
-    # Получаем данные всех коллекций # TODO: распараллелить
     asyncio.create_task(wrapper_get_all_collections())
     while True:
         
@@ -312,4 +311,3 @@ try:
     asyncio.run(main())
 except KeyboardInterrupt:
         logger.warning("Stopped.")
-# asyncio.run(check_all_collection_stats())

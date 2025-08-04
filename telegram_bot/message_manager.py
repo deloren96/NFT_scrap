@@ -105,20 +105,22 @@ class MessageManager:
 
     async def combine_messages(s) -> str:
         combined_message = ""
-        i = 0
-        while i < len(s.messages):
+        max_length = 4096
+        slice = 0
 
-            message = s.messages[i]
-            if len(combined_message) + len(message) > 4096:
-                s.messages = s.messages[i:]
+        for message in s.messages:
+
+            spacing = 2 if combined_message else 0
+            if len(combined_message) + spacing + len(message) > max_length:
                 break
-            else:
-                if combined_message:
-                    combined_message += "\n\n" + message
-                else:
-                    combined_message = message
-            i += 1
 
+            if combined_message:
+                combined_message += "\n\n"
+            combined_message += message
+
+            slice += 1
+
+        s.messages = s.messages[slice:]
         return combined_message
 
 
