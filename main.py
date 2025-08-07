@@ -4,36 +4,41 @@ log = logging.getLogger(__name__)
 logging.basicConfig(
     level=logging.DEBUG, 
     format="%(asctime)s:%(levelname)s:%(funcName)s: %(message)s",
-    datefmt="%H:%M:%S",
-    filename="main.log"
+    datefmt="%H:%M:%S"
 )
-import asyncio, os
+import asyncio, aiohttp, os
 
-from opensea.opensea import OpenSea_Scraper
-from telegram_bot import bot
+from OpenSea.opensea import OpenSea_Scraper
+from telegram_bot.bot import TelegramBot
+from telegram_bot.message_manager import NotificationManagerFactory
 
 from dotenv import load_dotenv; load_dotenv()
 TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN")
 
-async def init():
-    opensea = OpenSea_Scraper()
-    asyncio.create_task(opensea.run())
-    await bot.start_bot(token=TG_BOT_TOKEN, services={
-        "opensea": opensea
-    })
 
-async def finish():
-    log.info("Finishing...")
-    await bot.dp.storage.close()
-    await bot.dp.storage.wait_closed()
-    log.info("Finished.")
+
+async def init():
+    async with aiohttp.ClientSession() as session:
+        tg = TelegramBot(token=TG_BOT_TOKEN)
+
+        notification_managers = NotificationManagerFactory(
+            send_message=tg.bot.send_message,
+            parse_mode='HTML',
+            disable_web_page_preview=True
+        )
+
+        opensea = OpenSea_Scraper(
+            session=session,
+            notification_managers=notification_managers
+        )
+
+        asyncio.create_task(tg.start())
+        log.info("Telegram bot started")
+        await opensea.run()
+        print("OpenSea scraper started")
+        await asyncio.sleep(1)
+
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(init())
 
-    except KeyboardInterrupt:
-        log.info("Stopped.")
-        
-    except Exception as e:
-        log.error(f"Error: {e}")
+        asyncio.run(init())

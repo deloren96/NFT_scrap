@@ -6,58 +6,62 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-import asyncio, heapq
-from utils import get_usd_price, get_native_price
+import asyncio, time, heapq
+from collections import defaultdict
+from OpenSea.utils import get_usd_price, get_native_price
 
 class NotifyCreator:
-    def __init__(self, slugs_data, full_scanned, configs, notification_managers):
-        self.slugs_data = slugs_data
-        self.full_scanned = full_scanned
-        
-        self.configs = configs
-        self.notification_managers = notification_managers
-        
-        self.last_notifications = {}
-        self.last_diffs = {}
+    def __init__(self, scraper):
+        self.scraper = scraper
+        self.slugs_data = scraper.slugs_data
+
+
+        self.configs = scraper.configs
+        self.notification_managers = scraper.notification_managers
+
+        self.notification_queue = scraper.notification_queue
+
+        self.last_notifications = defaultdict(lambda: defaultdict(lambda: 0))
+        self.last_diffs         = defaultdict(lambda: defaultdict(lambda: 0))
 
 
 
     def is_blacklisted(self, new_collection, blacklist):
-        
         return new_collection["slug"] in blacklist
 
 
 
     def is_top_N_1dVolume(self, new_collection, top_volume):
 
-        if not self.full_scanned[0] or 0 >= top_volume: 
+        if not self.scraper.full_scanned or 0 >= top_volume:
             return False
 
 
+
         old_collections = [old_collection for old_collection in self.slugs_data.values() if old_collection.get("stats") is not None]
-        
+
         top_N = heapq.nlargest(
-            top_N,
+            top_volume,
             old_collections,
             key=lambda collection: collection["stats"]["oneDay"]["volume"]["usd"]
         )
-
+        # logger.debug(f"{top_volume} {len(top_N)}")
         if top_N \
             and any(collection['slug'] == new_collection['slug'] for collection in top_N):
                 return True
-
+        
         return False
 
 
 
     def is_in_range_1dVolume(self, new_collection, min_volume, max_volume):
-        
-        return (min_volume <= new_collection["stats"]["volume"]["usd"] <= max_volume)
+        # logger.debug(f"{min_volume} {new_collection['stats']['oneDay']['volume']['usd']} {max_volume}")
+        return (min_volume <= new_collection["stats"]["oneDay"]["volume"]["usd"] <= max_volume)
 
 
 
     def is_in_range_topOffer(self, new_collection, min_price, max_price):
-        
+        # logger.debug(f"{min_price} {get_usd_price(new_collection, 'topOffer')} {max_price}")
         return min_price <= (get_usd_price(new_collection, "topOffer") or 0) <= max_price
 
 
@@ -73,7 +77,7 @@ class NotifyCreator:
             return False
 
 
-        blacklist = config.blacklist or []
+        blacklist = config.blacklist or set()
 
         top_volume = config.top_N_by_1d_volume or float('inf')
         min_volume = config.min_USD_1d_volume or 0
@@ -93,6 +97,7 @@ class NotifyCreator:
         if top_volume < float('inf') and not self.is_top_N_1dVolume(new_collection, top_volume):
             return False
 
+
         if not self.is_in_range_1dVolume(new_collection, min_volume, max_volume):
             return False
 
@@ -104,8 +109,8 @@ class NotifyCreator:
         
         topOffer = get_usd_price(new_collection, "topOffer")
         floorPrice = get_usd_price(new_collection, "floorPrice")
-        
-        if not (topOffer and floorPrice): 
+
+        if not (topOffer and floorPrice):
             return False
         
         
@@ -113,8 +118,8 @@ class NotifyCreator:
 
 
         diff_offer_to_floor = (floorPrice - topOffer) / floorPrice * 100
-        
-        if diff_offer_to_floor > diff:
+        # logger.debug(f"Diff offer to floor: {diff_offer_to_floor:.2f}% {diff}")
+        if diff_offer_to_floor <= diff:
             
             conditions['diff_percent_offer_to_floor'] = diff_offer_to_floor
 
@@ -126,30 +131,37 @@ class NotifyCreator:
 
     
 
-    async def is_notification_cooldown_passed(self, collection, user_id, notification_cooldown):
-        if not notification_cooldown:
-            return True
+    def is_notification_cooldown_passed(self, collection, user_id, notification_cooldown):
 
-        now = asyncio.get_running_loop().time()
+        now = time.time()
 
-        previous_notification = self.last_notifications.setdefault(collection['slug'], {}).setdefault(user_id, 0)
+        previous_notification = self.last_notifications[collection['slug']][user_id]
+        
 
-        if now - previous_notification < notification_cooldown: 
+        # logger.debug(f"{now - previous_notification:.2f} {notification_cooldown}")
+        if notification_cooldown and previous_notification \
+            and now - previous_notification < notification_cooldown: 
             return False
 
         return True
 
 
 
-    def is_diff_step_range_passed(self, collection, diff, percent_step, user_id):
+    def is_diff_step_range_passed(self, user_id, collection, diff, percent_step):
         if not percent_step:
             return True
-                    
-        previous_diff = self.last_diffs.setdefault(collection['slug'], {}).setdefault(user_id, 0.001)
+
+        previous_diff = self.last_diffs[collection['slug']][user_id]
+
+        if previous_diff==0:
+            return True
 
         step_size = previous_diff * (percent_step / 100)
 
-        if abs(diff - previous_diff) <= step_size:
+        percents_from_previous_diff = abs(diff - previous_diff)
+
+        # logger.debug(f"{previous_diff} {percents_from_previous_diff:.2f} {step_size:.2f} {percent_step}")
+        if percents_from_previous_diff >= step_size:
             return True
 
         return False
@@ -175,55 +187,60 @@ class NotifyCreator:
         )
 
 
+    async def wraper_check_for_notifications(self):
+        """Обертка для проверки уведомлений"""
+        while True:
+            collection = await self.notification_queue.get()
+            for user_id, config in self.configs.items():
+                notification = await asyncio.wait_for(asyncio.get_event_loop().run_in_executor(None, self.check_for_notifications, collection, user_id, config), timeout=60)
+                if notification:
+                    await self.notification_managers.add_message(user_id, notification)
 
-    async def send_notifications(self, collection):
+    def check_for_notifications(self, collection, user_id, config):
         """Проверка условий и отправка уведомлений"""
-        for user_id, config in self.configs.items():
-
-            notification_cooldown = config.notification_cooldown or 0
-            percent_step = config.percent_step or 0
-
-            # Проверка кулдауна с последнего уведомления по notification_cooldown в config
-            if not await self.is_notification_cooldown_passed(collection, user_id, notification_cooldown):
-                continue
+    
+        # logger.debug(f"Checking conditions for {user_id} on collection {collection['slug']}")
+        notification_cooldown = config.notification_cooldown or 0
+        percent_step = config.percent_step or 0
 
 
+        # Проверка кулдауна с последнего уведомления по notification_cooldown в config
+        if not self.is_notification_cooldown_passed(collection, user_id, notification_cooldown):
+            return None
 
-            conditions = self.custom_condition(collection, user_id)
+
+        conditions = self.custom_condition(collection, user_id)
+
+        
+        # logger.debug(f"{conditions} Проверка условий для {user_id} по коллекции {collection['slug']}")
+        if conditions:
 
             diff = conditions.get('diff_percent_offer_to_floor', 0)
 
-            if conditions:
-                
-                # Проверка движения на шаг процентов с прошлого diff процента по percent_step в config
-                if not self.is_diff_step_range_passed(
 
-                    user_id,
-                    collection, 
-                    diff,
-                    percent_step
+            # Проверка движения на шаг процентов с прошлого diff процента по percent_step в config
 
-                ):
-                    continue
+            if not self.is_diff_step_range_passed(
 
+                user_id,
+                collection, 
+                diff,
+                percent_step
 
-                notification = self.build_notification(collection, diff)
-
-                try:
-
-                    await self.notification_managers[user_id].add_message(
-                        user_id, 
-                        notification
-                    )
+            ):
+                return None
 
 
-                    if notification_cooldown:
+            if notification_cooldown:
 
-                        now = asyncio.get_running_loop().time()
-                        self.last_notifications[collection['slug']][user_id] = now
+                now = time.time()
+                self.last_notifications[collection['slug']][user_id] = now
 
 
-                    if percent_step: 
-                        self.last_diffs.setdefault(collection['slug'], {})[user_id] = diff
-                
-                except Exception as e: logger.error(f"Error sending message to {user_id}: {e}")
+            if percent_step: 
+                self.last_diffs[collection['slug']][user_id] = diff
+
+
+            notification = self.build_notification(collection, diff)
+
+            return notification

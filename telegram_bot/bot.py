@@ -1,48 +1,38 @@
 import logging
-import asyncio, aiofiles, os, json
 
-from aiogram import Bot, Dispatcher, Router
-from aiogram.types import Message
-from aiogram.filters import CommandStart
+from aiogram import Bot, Dispatcher
 
-from telegram_bot.message_manager import MessageManager
+from telegram_bot.main_menu.handlers import \
+    commands as main_menu_commands, \
+    callbacks as main_menu_callbacks
+from telegram_bot.opensea.handlers import \
+    text_handlers as opensea_text_handlers, \
+    callbacks as opensea_callbacks
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-router = Router()
-bot = Bot(token=TG_BOT_TOKEN)
-dp = Dispatcher()
-dp.include_router(router)
-
-message_managers: dict[int, MessageManager] = {}
-
-def init_message_manager():
-    for chat_id in configs.keys():
-        if chat_id not in message_managers:
-            message_managers[chat_id] = MessageManager(chat_id, bot.send_message, parse_mode='HTML', disable_web_page_preview=True)
 
 
-@dp.message(CommandStart())
-async def cmd_start(message: Message):
-    if message.chat.type == 'private' and message.from_user.id not in configs:
-        configs[message.from_user.id] = Config()
-        
-        async with aiofiles.open("configs.json", "w") as f:
-            await f.write(json.dumps({user_id: cfg.save_config() for user_id, cfg in configs.items()}, indent=2))
+class TelegramBot:
+    def __init__(self, token: str):
+        self.bot = Bot(token=token)
+        self.dp = Dispatcher()
 
-        await message.answer("Вам теперь будут приходить уведомления.")
-    else:
-        await message.answer("Вы уже подписаны на уведомления. Хотите сбросить настройки?")
+        self.dp.include_router(main_menu_commands.router)
+        self.dp.include_router(main_menu_callbacks.router)
+        self.dp.include_router(opensea_text_handlers.router)
+        self.dp.include_router(opensea_callbacks.router)
 
 
 
-async def start_bot():
-
-    await dp.start_polling(bot)
-
-if __name__ == "__main__":
-    from dotenv import load_dotenv; load_dotenv()
-    TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN")
-    asyncio.run(start_bot())
+    async def start(self):
+        try:
+            logging.info("Бот запускается...")
+            await self.dp.start_polling(self.bot)
+        except Exception as e:
+            logging.error(f"Ошибка при запуске бота: {e}")
+        finally:
+            await self.bot.session.close()
+            logging.info("Бот остановлен.")

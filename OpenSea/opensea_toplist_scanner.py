@@ -9,24 +9,28 @@ logger = logging.getLogger(__name__)
 
 import asyncio, aiofiles
 import cloudscraper
+import pathlib
+
+from requests.exceptions import JSONDecodeError
 
 
 class OpenSea_TopListScanner:
     def __init__(
             self,
-            queue: asyncio.Queue,
-            slugs_data: dict,
-            notification_manager: callable
+            scraper
     ):
-        self.queue = queue
-        self.slugs_data = slugs_data
-        self.check_for_notification = notification_manager
+        self.scraper = scraper
+        self.queue = scraper.queue
+        self.slugs_data = scraper.slugs_data
 
-        self.full_scanned = False
+        self.notification_queue = scraper.notification_queue
+
+        self.file_dir = pathlib.Path(__file__).parent
 
 
     async def init(self):
-        async with aiofiles.open("./GraphQL/get_top_list.graphql", "r") as f:
+        graphql_file = self.file_dir / "GraphQL" / "get_top_list.graphql"
+        async with aiofiles.open(graphql_file, "r") as f:
             self.GET_TOP_LIST_QUERY = await f.read()
     
 
@@ -43,26 +47,40 @@ class OpenSea_TopListScanner:
         
         await self.init()
 
+        retry_delay = 1
+
         while True:
-            
-            temp_slugs_data = await asyncio.wait_for(
-                asyncio.get_event_loop().run_in_executor(None, self.get_all_collections), 
-                timeout=60  # секунд
-            )
+            temp_slugs_data = {}
+            try:
+                temp_slugs_data = await asyncio.wait_for(
+                    asyncio.get_event_loop().run_in_executor(None, self.get_all_collections), 
+                    timeout=60  # секунд
+                )
+                logger.debug(f"Получено {len(temp_slugs_data)} коллекций")
+                
+                retry_delay = 1
+
+            except Exception as e:
+                logger.error(f"Ошибка при получении коллекций: {e}")
+                await asyncio.sleep(retry_delay)
+
+                retry_delay = min(retry_delay * 2, 60)
+
 
             if not temp_slugs_data:
                 continue
+
 
             self.slugs_data.update(temp_slugs_data)
 
             await self.queue.put(set(temp_slugs_data.keys()))
 
-            if not self.full_scanned[0]:
-                self.full_scanned[0] = True
+            if not self.scraper.full_scanned:
+                self.scraper.full_scanned = True
 
             for collection in temp_slugs_data.values():
-                asyncio.create_task(self.check_for_notification(collection))
-            
+                await self.notification_queue.put(collection)
+
             await asyncio.sleep(60)
         
 
@@ -116,10 +134,9 @@ class OpenSea_TopListScanner:
 
                     if not next_page:
                         return temp_slugs_data
-                
                 except Exception as e:
-                    logger.error(f"Error fetching collections: {e}")
-                    next_page = None
+                    logger.error(f"Error fetching collections: {e} {response}")
+                    raise e
         
             
 

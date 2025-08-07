@@ -4,15 +4,49 @@ import asyncio
 from collections import deque
 
 from aiogram.exceptions import TelegramRetryAfter
-logging.basicConfig(level=logging.DEBUG)
+
+from telegram_bot.utils import Utils
+
+logging.basicConfig(level=logging.WARNING)
 log = logging.getLogger(__name__)
+
+
+
+class NotificationManagerFactory:
+
+    def __init__(self, send_message: callable, *args, **kwargs):
+        self.send_message = send_message
+        self.args = args
+        self.kwargs = kwargs
+
+        self.managers = {}
+
+
+
+    async def add_message(self, user_id, message):
+        if user_id not in self.managers:
+            self.managers[user_id] = MessageManager(
+                chat_id=user_id,
+                send_message=self.send_message,
+                *self.args,
+                **self.kwargs
+            )
+        
+        await self.managers[user_id].add_message(message)
+
+
 
 
 
 class MessageManager:
     """Менеджер, который распределяет отправку сообщений согласно лимитам Telegram Bot API."""
 
-    def __init__(self, chat_id: int, send_message: callable, *args, **kwargs):
+    def __init__(
+        self,
+        chat_id: int,
+        send_message: callable,
+        *args, **kwargs
+    ):
         """
         Инициализация менеджера сообщений.
 
@@ -78,8 +112,10 @@ class MessageManager:
 
 
     async def add_message(self, message):
-        log.debug(f"Adding message to {self.chat_id}")
-        await self.queue.put(message)
+        """Добавляет сообщение в очередь для отправки."""
+        if Utils.is_send_notifications[self.chat_id]:
+            log.debug(f"Adding message to {self.chat_id}")
+            await self.queue.put(message)
 
 
 
@@ -148,9 +184,9 @@ class MessageManager:
 
 
             if len(self.messages) > 0 and self.queue.empty():
-                log.debug(f"{self.chat_id if self.chat_id==857039354 else ''} No queued messages, only cached. {len(self.messages)}")
+                log.info(f"{self.chat_id if self.chat_id==857039354 else ''} No queued messages, only cached. {len(self.messages)}")
             else:
-                log.debug(f"{self.chat_id} Processing queue. {self.queue.qsize()} messages in queue, {len(self.messages)} cached messages")
+                log.info(f"{self.chat_id} Processing queue. {self.queue.qsize()} messages in queue, {len(self.messages)} cached messages")
                 self.messages.append(await self.queue.get())
             
             if self.flood_control:

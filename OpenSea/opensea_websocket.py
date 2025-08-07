@@ -6,75 +6,72 @@ logging.basicConfig(
     datefmt="%H:%M:%S"
 )
 logger = logging.getLogger(__name__)
-import asyncio, aiohttp, aiofiles, json, uuid
-from utils import get_usd_price, deep_dict_update
-
+import asyncio, aiohttp, aiofiles, json, uuid, pathlib
+from OpenSea.utils import get_usd_price, deep_dict_update
+from aiohttp.client_exceptions import WSServerHandshakeError
 
 
 class OpenSea_WebSocket:
     def __init__(
             self,
-            session: aiohttp.ClientSession,
-            queue: asyncio.Queue,
-            slugs_data: dict,
-            notification_manager: callable
+            scraper
         ):
-        self.session = session
+        self.session = scraper.session
         self.websocket: aiohttp.ClientWebSocketResponse = None
-        
-        self.queue: asyncio.Queue = queue
-        self.slugs_data = slugs_data
-        self.slugs_subscriptions = set(slugs_data.keys())
 
-        self.check_for_notification = notification_manager
+        self.queue: asyncio.Queue = scraper.queue
+        self.slugs_data = scraper.slugs_data
+
+        self.notification_queue = scraper.notification_queue
+        self.file_dir = pathlib.Path(__file__).parent
 
 
 
     async def init(self):
-        async with aiofiles.open("./GraphQL/subscribe_query_clean.graphql", "r") as f:
+        graphql_file = self.file_dir / "GraphQL" / "subscribe_query.graphql"
+        async with aiofiles.open(graphql_file, "r") as f:
             self.SUBSCRIBE_QUERY = await f.read()
 
 
 
     async def load_slugs(self):
         try:
-            async with aiofiles.open("collections.json", "r") as f:
-                self.slugs_subscriptions.update(json.loads(await f.read()))
+
+            async with aiofiles.open(self.file_dir / "collections.json", "r") as f:
+                return set(json.loads(await f.read()))
         except Exception as e:
             logger.error(f"Error loading collections: {e}") 
+            return set()
 
 
-
-    async def batch_subscribe(self, to_sub: list[str]):
+    async def batch_subscribe(self, to_sub: set[str]):
         """Подписываемся на все коллекции частями"""
+        to_sub: list[str] = list(to_sub)
 
         batch_size = 200
-        tasks = []
-        
+
         for i in range(0, len(to_sub), batch_size):
-            
-            batch = to_sub[i:i+batch_size]
-            
-            if batch:
-                
-                tasks.append(self.websocket.send_json(
-                    
-                    {
-                        "id": str(uuid.uuid4()), 
-                        "type": "subscribe", 
-                        "payload": {
-                            "query": self.SUBSCRIBE_QUERY,
-                            "operationName": "useCollectionStatsSubscription",
-                            "variables": {
-                                "slugs": batch
+
+
+            if batch := to_sub[i:i+batch_size]:
+
+                asyncio.create_task(
+                    self.websocket.send_json(
+
+                        {
+                            "id": str(uuid.uuid4()), 
+                            "type": "subscribe", 
+                            "payload": {
+                                "query": self.SUBSCRIBE_QUERY,
+                                "operationName": "useCollectionStatsSubscription",
+                                "variables": {
+                                    "slugs": batch
+                                }
                             }
                         }
-                    }
-                    
-                ))
 
-        await asyncio.gather(*tasks)
-
+                    )
+                )
 
 
     async def save_collections(self, subs: list):
@@ -84,37 +81,39 @@ class OpenSea_WebSocket:
                     list(subs), 
                     separators=(',', ':')
                 ))
+            logger.info(f"Saved {len(subs)} collections to file.")
         except:
-            pass
+            logger.error("Error saving collections to file.")
     
 
     
     async def init_subscriptions_manager(self):
         
         collection_manager = asyncio.create_task(self.manage_subscriptions())
+        new_slugs = await self.load_slugs()
 
         while not self.queue._getters:
             await asyncio.sleep(0.1)
 
-        await self.load_slugs()
-        await self.queue.put(self.slugs_subscriptions)
+        
+        await self.queue.put(new_slugs)
         return collection_manager
 
 
 
     async def manage_subscriptions(self):
         
-        active_slugs = self.slugs_subscriptions
+        active_slugs = set()
         try:
 
             while not self.websocket.closed:
-
-                new_slugs: set = await self.queue.get()
+                
+                new_slugs: set[str] = await self.queue.get()
                 
                 if not new_slugs:
                     logger.warning("No slugs found.")
                     continue
-
+                
                 new_subscriptions = new_slugs - active_slugs
                 
                 if not new_subscriptions:
@@ -148,7 +147,6 @@ class OpenSea_WebSocket:
 
             if not old_collection: 
                 slugs_data[slug] = new_collection
-            
             else:
 
                 old_floorPrice = get_usd_price(old_collection, "floorPrice")
@@ -162,9 +160,9 @@ class OpenSea_WebSocket:
 
                 deep_dict_update(old_collection, new_collection)
 
-            # logger.debug(f"{id} \n\n Slug: {slug}\n Floor Price: {floorPrice} USD, Top Offer: {topOffer} USD\n{'-'*70}")
+            # logger.debug(f"{id} \n\n Slug: {slug}\n Floor Price: {new_floorPrice} USD, Top Offer: {new_topOffer} USD\n{'-'*70}")
 
-            asyncio.create_task(self.check_for_notification(old_collection))
+            await self.notification_queue.put(slugs_data[slug])
 
 
 
@@ -173,6 +171,7 @@ class OpenSea_WebSocket:
 
         await self.init()
 
+        reconnect_delay = 1
 
         while True:
             
@@ -182,6 +181,8 @@ class OpenSea_WebSocket:
 
                 async with self.session.ws_connect(f"wss://os2-wss.prod.privatesea.io/subscriptions", heartbeat=30) as websocket:
                     self.websocket = websocket
+                    
+                    reconnect_delay = 1
 
                     await websocket.send_json({"type": "connection_init"})
 
@@ -191,6 +192,7 @@ class OpenSea_WebSocket:
 
                     async for message in websocket:
                         message_data = message.json()
+                        # logger.debug(f"Received WebSocket message: {message_data}")
 
 
                         if message_data.get("type") == "connection_ack":
@@ -209,7 +211,11 @@ class OpenSea_WebSocket:
                         await collection_manager
                         logger.info(f"WebSocket connection closed. {message.type}")
 
-
+            except WSServerHandshakeError as e:
+                logger.error(f"WebSocket connection failed: {e}\nRetrying in {reconnect_delay} seconds...")
+                await asyncio.sleep(reconnect_delay)
+                reconnect_delay = min(reconnect_delay * 2, 60)
             except Exception as e:
-                logger.error(f"Error in WebSocket connection: {e}")
-                await asyncio.sleep(1)
+                logger.error(f"Error in WebSocket connection: {e}\nRetrying in {reconnect_delay} seconds...")
+                await asyncio.sleep(reconnect_delay)
+                reconnect_delay = min(reconnect_delay * 2, 60)
